@@ -1,0 +1,16 @@
+{
+    "mongodb_host": "localhost",
+    "mongodb_port": 27017,
+    "databases": [
+        "db1", 
+        "db2"
+    ],
+    "collections": [
+        "collection1", 
+        "collection2"
+    ],
+    "date_field": "created_at",
+    "start_date": "2023-01-01",
+    "end_date": "2023-12-31"
+}
+

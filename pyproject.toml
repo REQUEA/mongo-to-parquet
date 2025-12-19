@@ -1,0 +1,10 @@
+[project]
+name = "mongodb-to-parquet"
+version = "0.1.0"
+description = "Copy mongodb data to parquet files"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pyarrow>=21.0.0",
+    "pymongo>=4.15.5",
+]

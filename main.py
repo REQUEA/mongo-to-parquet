@@ -4,18 +4,29 @@ import pyarrow.parquet as pq
 import logging
 import json
 import os
+import argparse
 from datetime import datetime
 from pymongo.errors import ConnectionFailure
 
 
 
-CONFIG_FILE = "./config.json"
 OUTPUT_DIR = "./output"
 LOG_FILE = "./mongodb_to_parquet.log"
 METADATA_FILE = "metadata.json"
 
 BATCH_SIZE = 10_000
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Export MongoDB collections to Parquet"
+    )
+    parser.add_argument(
+        "--config",
+        "-c",
+        required=True,
+        help="Path to configuration JSON file",
+    )
+    return parser.parse_args()
 
 
 def load_config():
@@ -190,7 +201,10 @@ def process_collection(
 
 
 def main():
-    cfg = load_config()
+
+    args = parse_args()
+
+    cfg = load_config(args.config)
     logger = create_logger()
     client = get_mongo_client(cfg)
     output_dir = cfg.get("output_dir", OUTPUT_DIR)

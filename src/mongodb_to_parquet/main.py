@@ -114,7 +114,8 @@ def process_collection(
     collection_cfg,
     logger,
     metadata,
-    output_dir
+    output_dir,
+    batch_size
 ):
     collection = db[collection_name]
 
@@ -151,7 +152,7 @@ def process_collection(
                 no_cursor_timeout=True,
                 session=session
             )
-            .batch_size(BATCH_SIZE)
+            .batch_size(batch_size)
         )
         try:
             for doc in cursor:
@@ -159,7 +160,7 @@ def process_collection(
                 doc = enrich_with_partitions(doc, date_field)
                 batch.append(doc)
 
-                if len(batch) >= BATCH_SIZE:
+                if len(batch) >= batch_size:
                     write_batch(batch, output_path, partitioned)
                     total_written += len(batch)
                     batch.clear()
@@ -199,6 +200,10 @@ def process_collection(
     )
 
 
+def format_batch_size(batch_size):
+    return f"{batch_size:_}"
+
+
 
 def main():
 
@@ -208,6 +213,8 @@ def main():
     logger = create_logger()
     client = get_mongo_client(cfg)
     output_dir = cfg.get("output_dir", OUTPUT_DIR)
+    batch_size = cfg.get("batch_size", BATCH_SIZE)
+    batch_size = format_batch_size(batch_size)
 
     dbs = cfg.get("databases") or client.list_database_names()
     metadata = {}
@@ -225,7 +232,8 @@ def main():
                 collection_cfg,
                 logger,
                 metadata,
-                output_dir
+                output_dir,
+                batch_size
             )
     
     metadata_path = os.path.join(output_dir, METADATA_FILE)

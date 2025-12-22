@@ -14,8 +14,6 @@
       },
       "db2": {},
     },
-    "date_field": "created_at",
-    "start_date": "2023-01-01",
-    "end_date": "2023-12-31"
+    "batch_size": 10_000
 }
 

@@ -211,7 +211,7 @@ def main():
     logger = create_logger()
     client = get_mongo_client(cfg)
     output_dir = cfg.get("output_dir", OUTPUT_DIR)
-    batch_size = cfg.get(int("batch_size"), BATCH_SIZE)
+    batch_size = cfg.get("batch_size", BATCH_SIZE)
 
     dbs = cfg.get("databases") or client.list_database_names()
     metadata = {}

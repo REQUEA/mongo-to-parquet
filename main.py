@@ -8,21 +8,15 @@ from datetime import datetime
 from pymongo.errors import ConnectionFailure
 
 
-# ======================
-# Configuration
-# ======================
 
 CONFIG_FILE = "./config.json"
 OUTPUT_DIR = "./output"
 LOG_FILE = "./mongodb_to_parquet.log"
 METADATA_FILE = "metadata.json"
 
-BATCH_SIZE = 10_000  # à ajuster selon RAM / débit disque
+BATCH_SIZE = 10_000
 
 
-# ======================
-# Utils
-# ======================
 
 def load_config():
     with open(CONFIG_FILE, "r") as f:
@@ -54,9 +48,6 @@ def get_mongo_client(cfg):
         raise RuntimeError(f"MongoDB connection failed: {e}")
 
 
-# ======================
-# Core logic
-# ======================
 
 def build_query(date_field, start_date, end_date):
     if not date_field:
@@ -197,9 +188,6 @@ def process_collection(
     )
 
 
-# ======================
-# Main
-# ======================
 
 def main():
     cfg = load_config()

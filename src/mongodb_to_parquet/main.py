@@ -4,6 +4,7 @@ import pyarrow.parquet as pq
 import logging
 import json
 import os
+from pathlib import Path
 import argparse
 from datetime import datetime
 from pymongo.errors import ConnectionFailure
@@ -12,7 +13,7 @@ from pymongo.errors import ConnectionFailure
 
 OUTPUT_DIR = "./output"
 LOG_FILE = "./mongodb_to_parquet.log"
-METADATA_FILE = "executions/metadata.json"
+METADATA_FILE = "metadata.json"
 
 BATCH_SIZE = 10_000
 
@@ -233,7 +234,8 @@ def main():
                 batch_size
             )
     
-        metadata_path = os.path.join(output_dir, db_name, f"{TIMESTAMP}_{METADATA_FILE}")
+        metadata_path = Path(output_dir) / "executions" / f"{TIMESTAMP}_{METADATA_FILE}"
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
 
         with open(metadata_path, "w") as f:
             json.dump(metadata, f, indent=2)

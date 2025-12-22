@@ -12,3 +12,6 @@ dependencies = [
 [build-ssytem]
 requires = ["setuptools>=80.9.0"]
 build-backend = "setuptools.build_meta"
+
+[project.scripts]
+mongo-to-parquet = "mongodb_to_parquet.main:main"

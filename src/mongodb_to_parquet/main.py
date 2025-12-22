@@ -12,9 +12,12 @@ from pymongo.errors import ConnectionFailure
 
 OUTPUT_DIR = "./output"
 LOG_FILE = "./mongodb_to_parquet.log"
-METADATA_FILE = "metadata.json"
+METADATA_FILE = "executions/metadata.json"
 
 BATCH_SIZE = 10_000
+
+NOW = datetime.now()
+TIMESTAMP = NOW.strftime("%Y%m%d_%H%M%S")
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -236,7 +239,7 @@ def main():
                 batch_size
             )
     
-        metadata_path = os.path.join(output_dir, db_name, METADATA_FILE)
+        metadata_path = os.path.join(output_dir, db_name, f"{TIMESTAMP}_{METADATA_FILE}")
 
         with open(metadata_path, "w") as f:
             json.dump(metadata, f, indent=2)

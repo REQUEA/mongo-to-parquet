@@ -29,8 +29,8 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_config():
-    with open(CONFIG_FILE, "r") as f:
+def load_config(config_file):
+    with open(config_file, "r") as f:
         return json.load(f)
 
 

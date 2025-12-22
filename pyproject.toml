@@ -5,6 +5,7 @@ description = "Copy mongodb data to parquet files"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
+    "psutil>=7.1.3",
     "pyarrow>=21.0.0",
     "pymongo>=4.15.5",
 ]

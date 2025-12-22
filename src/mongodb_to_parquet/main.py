@@ -16,6 +16,10 @@ BATCH_SIZE_DEFAULT = 10_000
 NOW = datetime.now()
 TIMESTAMP = NOW.strftime("%Y%m%d_%H%M%S")
 
+def load_config(config_file):
+    with open(config_file, "r") as f:
+        return json.load(f)
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Export MongoDB collections to Parquet")
     parser.add_argument("--config", "-c", required=True, help="Path to configuration JSON file")

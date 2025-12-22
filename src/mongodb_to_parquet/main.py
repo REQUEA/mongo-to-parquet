@@ -236,9 +236,9 @@ def main():
                 batch_size
             )
     
-    metadata_path = os.path.join(output_dir, METADATA_FILE)
+        metadata_path = os.path.join(output_dir, db_name, METADATA_FILE)
 
-    with open(metadata_path, "w") as f:
-        json.dump(metadata, f, indent=2)
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2)
 
     logger.info(json.dumps({"event": "job_finished"}))

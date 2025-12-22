@@ -5,162 +5,234 @@ import logging
 import json
 import os
 from datetime import datetime
-from pymongo.errors import ConnectionError
+from pymongo.errors import ConnectionFailure
 
 
+# ======================
+# Configuration
+# ======================
 
-CONFIG_FILE = 'config.json'
-LOG_FILE = 'mongodb_to_parquet.log'
-METADATA_FILE = 'metadata.json'
+CONFIG_FILE = "./config.json"
+OUTPUT_DIR = "./output"
+LOG_FILE = "./mongodb_to_parquet.log"
+METADATA_FILE = "metadata.json"
+
+BATCH_SIZE = 10_000  # à ajuster selon RAM / débit disque
+
+
+# ======================
+# Utils
+# ======================
 
 def load_config():
-    with open(CONFIG_FILE, 'r') as f:
-        config = json.load(f)
-    return config
-
-
-
-def get_mongo_client(host, port, db_name=None):
-    """Se connecter à la base de données MongoDB."""
-    try:
-        client = pymongo.MongoClient(host, port)
-        if db_name:
-            db = client[db_name]
-            return db
-        return client
-    except ConnectionError as e:
-        logging.error(f"Erreur de connexion à MongoDB : {e}")
-        raise
-
+    with open(CONFIG_FILE, "r") as f:
+        return json.load(f)
 
 
 def create_logger():
-    """Crée un logger pour les logs."""
-    logger = logging.getLogger()
+    logger = logging.getLogger("mongo_to_parquet")
     logger.setLevel(logging.INFO)
-    
-    file_handler = logging.FileHandler(LOG_FILE)
-    file_handler.setLevel(logging.INFO)
-    
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter)
-    
-    logger.addHandler(file_handler)
+
+    handler = logging.FileHandler(LOG_FILE)
+    formatter = logging.Formatter(
+        '{"ts":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}'
+    )
+    handler.setFormatter(formatter)
+
+    logger.addHandler(handler)
     return logger
 
 
+def get_mongo_client(cfg):
+    try:
+        return pymongo.MongoClient(
+            cfg["mongodb_host"],
+            cfg["mongodb_port"],
+            serverSelectionTimeoutMS=5000,
+        )
+    except ConnectionFailure as e:
+        raise RuntimeError(f"MongoDB connection failed: {e}")
 
-def filter_documents(collection, date_field, start_date=None, end_date=None):
-    """Filtrer les documents MongoDB selon la date."""
+
+# ======================
+# Core logic
+# ======================
+
+def build_query(date_field, start_date, end_date):
+    if not date_field:
+        return {}
+
     query = {}
-    if date_field:
-        if start_date:
-            query[date_field] = {'$gte': start_date}
-        if end_date:
-            query[date_field] = {'$lte': end_date}
-    return collection.find(query)
+    cond = {}
+    if start_date:
+        cond["$gte"] = start_date
+    if end_date:
+        cond["$lte"] = end_date
+
+    if cond:
+        query[date_field] = cond
+    return query
 
 
+def enrich_with_partitions(doc, date_field):
+    if not date_field:
+        return doc
 
-def save_to_parquet(documents, db_name, collection_name, date_field=None):
-    """Sauvegarder les documents sous forme de fichiers Parquet avec PyArrow."""
-    path = f'./output/{db_name}/{collection_name}/'
-    os.makedirs(path, exist_ok=True)
+    dt = doc.get(date_field)
+    if isinstance(dt, datetime):
+        doc["year"] = dt.year
+        doc["month"] = dt.month
+        doc["day"] = dt.day
+    return doc
 
-    table_data = []
-    for doc in documents:
-        doc.pop('_id', None)
-        table_data.append(doc)
 
-    if not table_data:
-        return
+def write_batch(docs, output_path, partitioned):
+    table = pa.Table.from_pylist(docs)
 
-    schema = pa.schema([
-        (key, pa.string()) for key in table_data[0].keys()
-    ])
-
-    table = pa.Table.from_pandas(pd.DataFrame(table_data), schema=schema)
-
-    if date_field:
-        for row in table.to_pandas().iterrows():
-            row = row[1]
-            date = row[date_field]
-            if isinstance(date, datetime):
-                year, month, day = date.year, date.month, date.day
-                file_path = f'{path}/{year}/{month}/{day}/data.parquet'
-                os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                
-                pq.write_table(table, file_path)
+    if partitioned:
+        pq.write_to_dataset(
+            table,
+            root_path=output_path,
+            partition_cols=["year", "month", "day"],
+            existing_data_behavior="overwrite_or_ignore",
+            compression="zstd",
+        )
     else:
-        file_path = f'{path}/data.parquet'
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        pq.write_table(table, file_path)
+        os.makedirs(output_path, exist_ok=True)
+        pq.write_table(
+            table,
+            os.path.join(output_path, "data.parquet"),
+            compression="zstd",
+        )
 
 
+def process_collection(
+    db,
+    collection_name,
+    collection_cfg,
+    logger,
+    metadata,
+    output_dir
+):
+    collection = db[collection_name]
 
-def save_metadata(metadata):
-    """Sauvegarder les métadonnées dans un fichier JSON."""
-    with open(METADATA_FILE, 'w') as f:
-        json.dump(metadata, f, indent=4)
+    date_field = collection_cfg.get("date_field")
+    start_date = collection_cfg.get("start_date")
+    end_date = collection_cfg.get("end_date")
+
+    if start_date:
+        start_date = datetime.fromisoformat(start_date)
+    if end_date:
+        end_date = datetime.fromisoformat(end_date)
+
+    query = build_query(date_field, start_date, end_date)
+
+    output_path = os.path.join(output_dir, db.name, collection_name)
+    partitioned = bool(date_field)
+
+    batch = []
+    total_written = 0
+
+    logger.info(
+        json.dumps(
+            {
+                "db": db.name,
+                "collection": collection_name,
+                "event": "start_collection",
+            }
+        )
+    )
+    with db.client.start_session() as session:
+        cursor = (
+            collection.find(
+                query,
+                no_cursor_timeout=True,
+                session=session
+            )
+            .batch_size(BATCH_SIZE)
+        )
+        try:
+            for doc in cursor:
+                doc.pop("_id", None)
+                doc = enrich_with_partitions(doc, date_field)
+                batch.append(doc)
+
+                if len(batch) >= BATCH_SIZE:
+                    write_batch(batch, output_path, partitioned)
+                    total_written += len(batch)
+                    batch.clear()
+
+                    logger.info(
+                        json.dumps(
+                            {
+                                "db": db.name,
+                                "collection": collection_name,
+                                "written": total_written,
+                            }
+                        )
+                    )
+
+            if batch:
+                write_batch(batch, output_path, partitioned)
+                total_written += len(batch)
+        
+        finally:
+            cursor.close()
+
+    metadata[db.name][collection_name] = {
+        "estimated_total": collection.estimated_document_count(),
+        "documents_copied": total_written,
+        "partitioned": partitioned,
+    }
+
+    logger.info(
+        json.dumps(
+            {
+                "db": db.name,
+                "collection": collection_name,
+                "event": "end_collection",
+                "total_written": total_written,
+            }
+        )
+    )
 
 
+# ======================
+# Main
+# ======================
 
-def process_mongodb_to_parquet():
-    config = load_config()
+def main():
+    cfg = load_config()
     logger = create_logger()
+    client = get_mongo_client(cfg)
+    output_dir = cfg.get("output_dir", OUTPUT_DIR)
 
-    client = get_mongo_client(config['mongodb_host'], config['mongodb_port'])
-    
-    # Get all databases if not configured
-    dbs_to_process = config.get('databases', [])
-    if not dbs_to_process:
-        dbs_to_process = client.list_database_names()
-
+    dbs = cfg.get("databases") or client.list_database_names()
     metadata = {}
 
-    for db_name in dbs_to_process:
+    for db_name, db_cfg in dbs.items():
         db = client[db_name]
-        logger.info(f"Traitement de la base de données: {db_name}")
-        
-        # Get all collections if not configured
-        collections_to_process = config.get('collections', [])
-        if not collections_to_process:
-            collections_to_process = db.list_collection_names()
-        
-        for collection_name in collections_to_process:
-            collection = db[collection_name]
-            logger.info(f"Traitement de la collection: {collection_name}")
-            
-            date_field = config.get('date_field')
-            start_date = config.get('start_date')
-            end_date = config.get('end_date')
+        metadata[db_name] = {}
 
-            if start_date:
-                start_date = datetime.strptime(start_date, '%Y-%m-%d')
-            if end_date:
-                end_date = datetime.strptime(end_date, '%Y-%m-%d')
-            
-            documents = filter_documents(collection, date_field, start_date, end_date)
-            
-            documents_list = list(documents)
-            if not documents_list:
-                logger.info(f"Aucun document trouvé pour {db_name}.{collection_name}.")
-                continue
+        collections_cfg = db_cfg.get("collections", {})
 
-            save_to_parquet(documents_list, db_name, collection_name, date_field)
-            
-            metadata[db_name] = metadata.get(db_name, {})
-            metadata[db_name][collection_name] = {
-                "total_documents": len(documents_list),
-                "documents_copied": len(documents_list)
-            }
-            
-            logger.info(f"Documents copiés pour {db_name}.{collection_name}: {len(documents_list)}")
+        for collection_name, collection_cfg in collections_cfg.items():
+            process_collection(
+                db,
+                collection_name,
+                collection_cfg,
+                logger,
+                metadata,
+                output_dir
+            )
+    
+    metadata_path = os.path.join(output_dir, METADATA_FILE)
 
-    save_metadata(metadata)
-    logger.info(f"Processus terminé. Métadonnées sauvegardées dans {METADATA_FILE}")
+    with open(metadata_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+
+    logger.info(json.dumps({"event": "job_finished"}))
 
 
-if __name__ == '__main__':
-    process_mongodb_to_parquet()
-
+if __name__ == "__main__":
+    main()

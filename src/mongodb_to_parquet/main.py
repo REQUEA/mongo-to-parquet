@@ -203,11 +203,6 @@ def process_collection(
     )
 
 
-def format_batch_size(batch_size):
-    return f"{batch_size:_}"
-
-
-
 def main():
 
     args = parse_args()
@@ -217,7 +212,6 @@ def main():
     client = get_mongo_client(cfg)
     output_dir = cfg.get("output_dir", OUTPUT_DIR)
     batch_size = cfg.get("batch_size", BATCH_SIZE)
-    batch_size = format_batch_size(batch_size)
 
     dbs = cfg.get("databases") or client.list_database_names()
     metadata = {}

@@ -8,15 +8,14 @@ from pathlib import Path
 import argparse
 from datetime import datetime
 from pymongo.errors import ConnectionFailure
-
+import time
+import concurrent.futures
 
 
 OUTPUT_DIR = "./output"
 LOG_FILE = "./mongodb_to_parquet.log"
 METADATA_FILE = "metadata.json"
-
 BATCH_SIZE = 10_000
-
 NOW = datetime.now()
 TIMESTAMP = NOW.strftime("%Y%m%d_%H%M%S")
 
@@ -32,11 +31,9 @@ def parse_args():
     )
     return parser.parse_args()
 
-
 def load_config(config_file):
     with open(config_file, "r") as f:
         return json.load(f)
-
 
 def create_logger():
     logger = logging.getLogger("mongo_to_parquet")
@@ -51,18 +48,22 @@ def create_logger():
     logger.addHandler(handler)
     return logger
 
-
-def get_mongo_client(cfg):
-    try:
-        return pymongo.MongoClient(
-            cfg["mongodb_host"],
-            cfg["mongodb_port"],
-            serverSelectionTimeoutMS=5000,
-        )
-    except ConnectionFailure as e:
-        raise RuntimeError(f"MongoDB connection failed: {e}")
-
-
+def get_mongo_client(cfg, retries=5, delay=5):
+    attempt = 0
+    while attempt < retries:
+        try:
+            return pymongo.MongoClient(
+                cfg["mongodb_host"],
+                cfg["mongodb_port"],
+                serverSelectionTimeoutMS=5000,
+            )
+        except ConnectionFailure as e:
+            attempt += 1
+            if attempt < retries:
+                time.sleep(delay)
+                continue
+            else:
+                raise RuntimeError(f"MongoDB connection failed after {retries} attempts: {e}")
 
 def build_query(date_field, start_date, end_date):
     if not date_field:
@@ -79,7 +80,6 @@ def build_query(date_field, start_date, end_date):
         query[date_field] = cond
     return query
 
-
 def enrich_with_partitions(doc, date_field):
     if not date_field:
         return doc
@@ -91,8 +91,7 @@ def enrich_with_partitions(doc, date_field):
         doc["day"] = dt.day
     return doc
 
-
-def write_batch(docs, output_path, partitioned):
+def write_batch(docs, output_path, partitioned, compression="zstd"):
     table = pa.Table.from_pylist(docs)
 
     if partitioned:
@@ -101,16 +100,15 @@ def write_batch(docs, output_path, partitioned):
             root_path=output_path,
             partition_cols=["year", "month", "day"],
             existing_data_behavior="overwrite_or_ignore",
-            compression="zstd",
+            compression=compression,
         )
     else:
         os.makedirs(output_path, exist_ok=True)
         pq.write_table(
             table,
             os.path.join(output_path, "data.parquet"),
-            compression="zstd",
+            compression=compression,
         )
-
 
 def process_collection(
     db,
@@ -119,7 +117,8 @@ def process_collection(
     logger,
     metadata,
     output_dir,
-    batch_size
+    batch_size,
+    compression
 ):
     collection = db[collection_name]
 
@@ -143,9 +142,10 @@ def process_collection(
     logger.info(
         json.dumps(
             {
+                "event": "start_collection",
                 "db": db.name,
                 "collection": collection_name,
-                "event": "start_collection",
+                "timestamp": datetime.now().isoformat(),
             }
         )
     )
@@ -165,13 +165,14 @@ def process_collection(
                 batch.append(doc)
 
                 if len(batch) >= batch_size:
-                    write_batch(batch, output_path, partitioned)
+                    write_batch(batch, output_path, partitioned, compression)
                     total_written += len(batch)
                     batch.clear()
 
                     logger.info(
                         json.dumps(
                             {
+                                "event": "batch_written",
                                 "db": db.name,
                                 "collection": collection_name,
                                 "written": total_written,
@@ -180,7 +181,7 @@ def process_collection(
                     )
 
             if batch:
-                write_batch(batch, output_path, partitioned)
+                write_batch(batch, output_path, partitioned, compression)
                 total_written += len(batch)
         
         finally:
@@ -195,49 +196,66 @@ def process_collection(
     logger.info(
         json.dumps(
             {
+                "event": "end_collection",
                 "db": db.name,
                 "collection": collection_name,
-                "event": "end_collection",
+                "timestamp": datetime.now().isoformat(),
                 "total_written": total_written,
             }
         )
     )
 
+def validate_config(cfg):
+    required_fields = ["mongodb_host", "mongodb_port", "databases"]
+    for field in required_fields:
+        if field not in cfg:
+            raise ValueError(f"Missing required field in config: {field}")
 
 def main():
-
     args = parse_args()
-
     cfg = load_config(args.config)
+    validate_config(cfg)
+    
     logger = create_logger()
     client = get_mongo_client(cfg)
     output_dir = cfg.get("output_dir", OUTPUT_DIR)
     batch_size = cfg.get("batch_size", BATCH_SIZE)
+    compression = cfg.get("compression", "zstd")
 
     dbs = cfg.get("databases") or client.list_database_names()
     metadata = {}
 
-    for db_name, db_cfg in dbs.items():
-        db = client[db_name]
-        metadata[db_name] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = []
+        for db_name, db_cfg in dbs.items():
+            db = client[db_name]
+            metadata[db_name] = {}
+            collections_cfg = db_cfg.get("collections", {})
 
-        collections_cfg = db_cfg.get("collections", {})
+            for collection_name, collection_cfg in collections_cfg.items():
+                futures.append(
+                    executor.submit(
+                        process_collection,
+                        db,
+                        collection_name,
+                        collection_cfg,
+                        logger,
+                        metadata,
+                        output_dir,
+                        batch_size,
+                        compression
+                    )
+                )
 
-        for collection_name, collection_cfg in collections_cfg.items():
-            process_collection(
-                db,
-                collection_name,
-                collection_cfg,
-                logger,
-                metadata,
-                output_dir,
-                batch_size
-            )
-    
-        metadata_path = Path(output_dir) / "executions" / f"{TIMESTAMP}_{METADATA_FILE}"
-        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        concurrent.futures.wait(futures)
 
-        with open(metadata_path, "w") as f:
-            json.dump(metadata, f, indent=2)
+    metadata_path = Path(output_dir) / "executions" / f"{TIMESTAMP}_{METADATA_FILE}"
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(metadata_path, "w") as f:
+        json.dump(metadata, f, indent=2)
 
     logger.info(json.dumps({"event": "job_finished"}))
+
+
+
+

@@ -30,7 +30,9 @@ def create_logger():
     logger = logging.getLogger("mongo_to_parquet")
     logger.setLevel(logging.INFO)
     handler = logging.FileHandler(LOG_FILE)
-    formatter = logging.Formatter('{"ts":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}')
+    formatter = logging.Formatter(
+        '{"ts":"%(asctime)s", "level":"%(levelname)s", "function":"%(funcName)s", "msg":"%(message)s"}'
+    )
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     return logger
@@ -62,14 +64,36 @@ def get_available_memory():
     mem = psutil.virtual_memory()
     return mem.available / (1024 * 1024)  # Convertir en Mo
 
+def build_query(date_field, start_date, end_date):
+    query = {}
+
+    if date_field:
+        if start_date and end_date:
+            query[date_field] = {"$gte": start_date, "$lte": end_date}
+        elif start_date:
+            query[date_field] = {"$gte": start_date}
+        elif end_date:
+            query[date_field] = {"$lte": end_date}
+    return query
+
 def get_dynamic_batch_size_with_memory(collection):
     available_memory_mb = get_available_memory()
     print(f"Available memory: {available_memory_mb} MB")
     return get_dynamic_batch_size(collection, target_memory_mb=available_memory_mb // 2)  # Utiliser la moitié de la mémoire
 
+def enrich_with_partitions(doc, date_field):
+    if not date_field:
+        return doc
+
+    dt = doc.get(date_field)
+    if isinstance(dt, datetime):
+        doc["year"] = dt.year
+        doc["month"] = dt.month
+        doc["day"] = dt.day
+    return doc
+
 def process_collection(db, collection_name, collection_cfg, logger, metadata, output_dir, batch_size=None, compression="zstd"):
     collection = db[collection_name]
-
     if batch_size is None:
         batch_size = get_dynamic_batch_size_with_memory(collection)
 
@@ -81,7 +105,7 @@ def process_collection(db, collection_name, collection_cfg, logger, metadata, ou
         start_date = datetime.fromisoformat(start_date)
     if end_date:
         end_date = datetime.fromisoformat(end_date)
-
+    
     query = build_query(date_field, start_date, end_date)
     output_path = os.path.join(output_dir, db.name, collection_name)
     partitioned = bool(date_field)
@@ -98,7 +122,6 @@ def process_collection(db, collection_name, collection_cfg, logger, metadata, ou
                 doc.pop("_id", None)
                 doc = enrich_with_partitions(doc, date_field)
                 batch.append(doc)
-
                 if len(batch) >= batch_size:
                     write_batch(batch, output_path, partitioned, compression)
                     total_written += len(batch)
@@ -118,7 +141,6 @@ def process_collection(db, collection_name, collection_cfg, logger, metadata, ou
 
 def write_batch(docs, output_path, partitioned, compression):
     table = pa.Table.from_pylist(docs)
-
     if partitioned:
         pq.write_to_dataset(
             table,
@@ -138,10 +160,13 @@ def write_batch(docs, output_path, partitioned, compression):
 def process_database(db, db_cfg, logger, metadata, output_dir, batch_size, compression):
     metadata[db.name] = {}
     collections_cfg = db_cfg.get("collections", {})
-    
+    logger.info(f"Toto: {collections_cfg}") 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = []
         for collection_name, collection_cfg in collections_cfg.items():
+            logger.info(f"Submitting collection {collection_name} to ThreadPoolExecutor")
+            logger.info(f"Collection Name: {collection_name}")
+            logger.info(f"Collection Config: {collection_cfg}")
             futures.append(
                 executor.submit(
                     process_collection,

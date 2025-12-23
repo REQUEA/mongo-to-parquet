@@ -1,197 +1,221 @@
+import json
+import logging
 import pymongo
 import pyarrow as pa
 import pyarrow.parquet as pq
-import json
-import logging
-import os
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 import argparse
 import concurrent.futures
 
+# =====================================================
+# CONFIG
+# =====================================================
 
-OUTPUT_DIR = "./output"
-LOG_FILE = "./mongodb_to_parquet.log"
-METADATA_FILE = "metadata.json"
+class AppConfig:
+    def __init__(self, path: str):
+        with open(path) as f:
+            self.raw = json.load(f)
 
-BATCH_SIZE = 10_000           
-ROW_GROUP_SIZE = 100_000    
-NOW = datetime.now()
-TIMESTAMP = NOW.strftime("%Y%m%d_%H%M%S")
+        self.mongodb_host = self.raw["mongodb_host"]
+        self.mongodb_port = self.raw["mongodb_port"]
+        self.output_dir = self.raw.get("output_dir", "./output")
+        self.compression = self.raw.get("compression", "zstd")
 
+        self.start_date = self._parse_date(self.raw.get("start_date"))
+        self.end_date = self._parse_date(self.raw.get("end_date"))
 
-def load_config(config_file):
-    with open(config_file, "r") as f:
-        return json.load(f)
+        self.include_databases = set(self.raw.get("include_databases", []))
+        self.exclude_databases = set(self.raw.get("exclude_databases", []))
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Export MongoDB to Parquet")
-    parser.add_argument("--config", "-c", required=True)
-    return parser.parse_args()
+        if self.include_databases and self.exclude_databases:
+            raise ValueError("Cannot specify both include_databases and exclude_databases")
 
+        self.date_collections = self.raw.get("date_collections", {})
+
+    def _parse_date(self, value):
+        if not value:
+            return None
+        return datetime.fromisoformat(value)
+
+# =====================================================
+# LOGGING
+# =====================================================
 
 def create_logger():
     logger = logging.getLogger("mongo_to_parquet")
     logger.setLevel(logging.INFO)
-    handler = logging.FileHandler(LOG_FILE)
+    handler = logging.FileHandler("mongodb_to_parquet.log")
     formatter = logging.Formatter(
-        '{"ts":"%(asctime)s","level":"%(levelname)s","function":"%(funcName)s","msg":"%(message)s"}'
+        '{"ts":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}'
     )
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     return logger
 
+# =====================================================
+# MONGO CONNECTION
+# =====================================================
 
-def get_mongo_client(cfg):
-    return pymongo.MongoClient(
-        cfg["mongodb_host"],
-        cfg["mongodb_port"],
-        serverSelectionTimeoutMS=5000
-    )
+class MongoConnection:
+    def __init__(self, cfg: AppConfig):
+        self.client = pymongo.MongoClient(
+            cfg.mongodb_host,
+            cfg.mongodb_port,
+            serverSelectionTimeoutMS=5000
+        )
 
-def build_query(date_field, start_date, end_date):
-    if not date_field:
-        return {}
+    def list_databases(self):
+        return self.client.list_database_names()
 
-    query = {}
-    if start_date:
-        query.setdefault(date_field, {})["$gte"] = start_date
-    if end_date:
-        query.setdefault(date_field, {})["$lte"] = end_date
-    return query
+    def get_database(self, name):
+        return self.client[name]
 
-def enrich_with_partitions(doc, date_field):
-    if not date_field:
+    def start_session(self):
+        return self.client.start_session()
+
+# =====================================================
+# PARQUET WRITER
+# =====================================================
+
+class ParquetWriterService:
+    ROW_GROUP_SIZE = 100_000
+
+    def __init__(self, output_dir, compression, logger):
+        self.output_dir = output_dir
+        self.compression = compression
+        self.logger = logger
+
+    def _enrich_partitions(self, doc, date_field):
+        if not date_field:
+            return doc
+        dt = doc.get(date_field)
+        if isinstance(dt, datetime):
+            doc["year"] = dt.year
+            doc["month"] = dt.month
+            doc["day"] = dt.day
         return doc
 
-    dt = doc.get(date_field)
-    if isinstance(dt, datetime):
-        doc["year"] = dt.year
-        doc["month"] = dt.month
-        doc["day"] = dt.day
-    return doc
+    def write_collection(self, cursor, db_name, collection_name, date_field):
+        base_path = Path(self.output_dir) / db_name / collection_name
+        base_path.mkdir(parents=True, exist_ok=True)
 
+        buffer = []
+        schema = None
+        total = 0
 
-def write_parquet_stream(cursor, output_path, compression, date_field, logger):
-    buffer = []
-    total_written = 0
-    schema = None
+        for doc in cursor:
+            doc.pop("_id", None)
+            doc = self._enrich_partitions(doc, date_field)
+            buffer.append(doc)
 
-    os.makedirs(output_path, exist_ok=True)
+            if len(buffer) >= self.ROW_GROUP_SIZE:
+                total += self._flush(buffer, base_path, schema)
+                schema = schema or pa.Table.from_pylist(buffer).schema
+                buffer.clear()
 
-    for doc in cursor:
-        doc.pop("_id", None)
-        doc = enrich_with_partitions(doc, date_field)
-        buffer.append(doc)
+        if buffer:
+            total += self._flush(buffer, base_path, schema)
 
-        if schema is None and buffer:
-            table = pa.Table.from_pylist(buffer)
-            schema = table.schema
+        return total
 
-        if len(buffer) >= ROW_GROUP_SIZE:
-            table = pa.Table.from_pylist(buffer, schema=schema)
-            filename = f"part-{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.parquet"
-            filepath = os.path.join(output_path, filename)
-            pq.write_table(table, filepath, compression=compression)
-            total_written += len(buffer)
-            buffer.clear()
-            logger.info(f"Wrote {total_written} documents to {filepath}")
-
-    if buffer:
+    def _flush(self, buffer, path, schema):
         table = pa.Table.from_pylist(buffer, schema=schema)
         filename = f"part-{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.parquet"
-        filepath = os.path.join(output_path, filename)
-        pq.write_table(table, filepath, compression=compression)
-        total_written += len(buffer)
-        logger.info(f"Wrote final {len(buffer)} documents to {filepath}")
 
-    return total_written
-
-
-def process_collection(db, collection_name, collection_cfg, logger, metadata, output_dir, compression):
-    collection = db[collection_name]
-
-    date_field = collection_cfg.get("date_field")
-    start_date = collection_cfg.get("start_date")
-    end_date = collection_cfg.get("end_date")
-
-    if start_date:
-        start_date = datetime.fromisoformat(start_date)
-    if end_date:
-        end_date = datetime.fromisoformat(end_date)
-
-    query = build_query(date_field, start_date, end_date)
-    output_path = os.path.join(output_dir, db.name, collection_name)
-
-    logger.info(f"Starting collection {db.name}.{collection_name}")
-
-    with db.client.start_session() as session:
-        cursor = collection.find(
-            query,
-            no_cursor_timeout=True,
-            batch_size=BATCH_SIZE,
-            session=session
+        pq.write_table(
+            table,
+            path / filename,
+            compression=self.compression
         )
-        try:
-            total_written = write_parquet_stream(cursor, output_path, compression, date_field, logger)
-        finally:
-            cursor.close()
 
-    metadata[db.name][collection_name] = {
-        "estimated_total": collection.estimated_document_count(),
-        "documents_copied": total_written
-    }
+        self.logger.info(f"Wrote {len(buffer)} rows to {path / filename}")
+        return len(buffer)
 
-    logger.info(f"Finished collection {db.name}.{collection_name}, total_written={total_written}")
+# =====================================================
+# EXPORT JOB
+# =====================================================
 
+class ExportJob:
+    def __init__(self, cfg: AppConfig, mongo: MongoConnection, logger):
+        self.cfg = cfg
+        self.mongo = mongo
+        self.logger = logger
+        self.writer = ParquetWriterService(cfg.output_dir, cfg.compression, logger)
 
-def process_database(db_name, db_cfg, client, logger, metadata, output_dir, compression):
-    db = client[db_name]
-    metadata[db_name] = {}
+    def run(self):
+        all_db_names = set(self.mongo.list_databases())
 
-    collections_cfg = db_cfg.get("collections", {})
+        if self.cfg.include_databases:
+            db_names = all_db_names & self.cfg.include_databases
+        elif self.cfg.exclude_databases:
+            db_names = all_db_names - self.cfg.exclude_databases
+        else:
+            db_names = all_db_names
 
-    logger.info(f"Starting database {db_name}")
+        if not db_names:
+            self.logger.warning("No databases to process.")
+            return
 
-    for collection_name, collection_cfg in collections_cfg.items():
-        process_collection(db, collection_name, collection_cfg, logger, metadata, output_dir, compression)
+        self.logger.info(f"Databases to process: {db_names}")
 
-    logger.info(f"Finished database {db_name}")
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(4, len(db_names))
+        ) as executor:
+            futures = [
+                executor.submit(self._process_database, db_name)
+                for db_name in db_names
+            ]
+            concurrent.futures.wait(futures)
+
+    def _process_database(self, db_name):
+        self.logger.info(f"START DB {db_name}")
+        db = self.mongo.get_database(db_name)
+
+        for coll_name, date_field in self.cfg.date_collections.items():
+            if coll_name in db.list_collection_names():
+                self._process_collection(db, coll_name, date_field)
+            else:
+                self.logger.info(f"Collection {coll_name} not found in {db_name}, skipping.")
+
+        self.logger.info(f"END DB {db_name}")
+
+    def _process_collection(self, db, coll_name, date_field):
+        query = {}
+        if date_field:
+            if self.cfg.start_date:
+                query.setdefault(date_field, {})["$gte"] = self.cfg.start_date
+            if self.cfg.end_date:
+                query.setdefault(date_field, {})["$lte"] = self.cfg.end_date
+
+        self.logger.info(f"START {db.name}.{coll_name} | query={query}")
+
+        with self.mongo.start_session() as session:
+            cursor = db[coll_name].find(
+                query,
+                no_cursor_timeout=True,
+                batch_size=10_000,
+                session=session
+            )
+            try:
+                total = self.writer.write_collection(cursor, db.name, coll_name, date_field)
+            finally:
+                cursor.close()
+
+        self.logger.info(f"END {db.name}.{coll_name} | documents={total}")
+
+# =====================================================
+# MAIN
+# =====================================================
 
 def main():
-    args = parse_args()
-    cfg = load_config(args.config)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", "-c", required=True, help="Path to config JSON")
+    args = parser.parse_args()
+
+    cfg = AppConfig(args.config)
     logger = create_logger()
+    mongo = MongoConnection(cfg)
 
-    client = get_mongo_client(cfg)
-    output_dir = cfg.get("output_dir", OUTPUT_DIR)
-    compression = cfg.get("compression", "zstd")
-
-    dbs = cfg.get("databases", {})
-    metadata = {}
-    MAX_WORKERS = 6 if len(dbs) > 6 else len(dbs)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = []
-        for db_name, db_cfg in dbs.items():
-            futures.append(
-                executor.submit(
-                    process_database,
-                    db_name,
-                    db_cfg,
-                    client,
-                    logger,
-                    metadata,
-                    output_dir,
-                    compression
-                )
-            )
-
-        concurrent.futures.wait(futures)
-
-    metadata_path = Path(output_dir) / "executions" / f"{TIMESTAMP}_{METADATA_FILE}"
-    metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(metadata_path, "w") as f:
-        json.dump(metadata, f, indent=2)
-
-    logger.info("All databases processed successfully.")
+    job = ExportJob(cfg, mongo, logger)
+    job.run()

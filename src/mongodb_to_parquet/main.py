@@ -79,7 +79,7 @@ class MongoConnection:
 # =====================================================
 
 class ParquetWriterService:
-    ROW_GROUP_SIZE = 100_000
+    ROW_GROUP_SIZE = 4000_000
 
     def __init__(self, output_dir, compression, logger):
         self.output_dir = output_dir

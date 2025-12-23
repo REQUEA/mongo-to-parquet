@@ -79,7 +79,7 @@ class MongoConnection:
 # =====================================================
 
 class ParquetWriterService:
-    ROW_GROUP_SIZE = 4000_000
+    ROW_GROUP_SIZE = 400_000
 
     def __init__(self, output_dir, compression, logger):
         self.output_dir = output_dir
@@ -160,7 +160,7 @@ class ExportJob:
         self.logger.info(f"Databases to process: {db_names}")
 
         with concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(4, len(db_names))
+            max_workers=6
         ) as executor:
             futures = [
                 executor.submit(self._process_database, db_name)

@@ -18,6 +18,8 @@ METADATA_FILE = "metadata.json"
 TARGET_PARQUET_MB = 150          
 TARGET_ARROW_MB=200
 ROW_GROUP_SIZE = 1_000_000      
+ROW_PER_FILE=300_000
+CHECK_EVERY=10_000
 
 NOW = datetime.now()
 TIMESTAMP = NOW.strftime("%Y%m%d_%H%M%S")
@@ -132,19 +134,17 @@ def process_collection(
                 doc.pop("_id", None)
                 doc = enrich_with_partitions(doc, date_field)
                 buffer.append(doc)
-
-                if len(buffer) % 10_000 == 0:
+                if len(buffer) % CHECK_EVERY == 0 and len(buffer) >= ROWS_PER_FILE:
                     table = pa.Table.from_pylist(buffer)
-                    if table.nbytes >= target_arrow_bytes:
-                        write_parquet_file(table, output_path, compression)
-                        total_written += len(buffer)
-                        buffer.clear()
+                    write_parquet_file(table, output_path, compression)
+                    total_written += len(buffer)
+                    buffer.clear()
 
-                        logger.info(json.dumps({
-                            "db": db.name,
-                            "collection": collection_name,
-                            "written": total_written
-                        }))
+                    logger.info(json.dumps({
+                        "db": db.name,
+                        "collection": collection_name,
+                        "written": total_written
+                    }))
 
             if buffer:
                 table = pa.Table.from_pylist(buffer)

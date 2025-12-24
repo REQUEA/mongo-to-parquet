@@ -107,6 +107,7 @@ class ParquetWriterService:
         writer = None
         schema = None
         total = 0
+        rows_in_file = 0
 
         for doc in cursor:
             doc.pop("_id", None)
@@ -114,15 +115,23 @@ class ParquetWriterService:
             buffer.append(doc)
 
             if len(buffer) >= self.row_group_size:
-                writer, schema, written = self._flush(
-                    buffer, base_path, writer, schema
+                writer, schema, written, rows_in_file = self._flush(
+                    buffer,
+                    base_path,
+                    writer,
+                    schema,
+                    rows_in_file
                 )
                 total += written
                 buffer.clear()
 
         if buffer:
-            writer, schema, written = self._flush(
-                buffer, base_path, writer, schema
+            writer, schema, written, rows_in_file = self._flush(
+                buffer,
+                base_path,
+                writer,
+                schema,
+                rows_in_file
             )
             total += written
 
@@ -131,27 +140,39 @@ class ParquetWriterService:
 
         return total
 
+    def _new_writer(self, path, schema):
+        filename = f"part-{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.parquet"
+        return pq.ParquetWriter(
+            path / filename,
+            schema,
+            compression=self.compression
+        )
 
-    def _flush(self, buffer, path, writer, schema):
+    def _flush(self, buffer, path, writer, schema, rows_in_file):
         if schema is None:
             table = pa.Table.from_pylist(buffer)
             schema = table.schema
-            writer = pq.ParquetWriter(
-                path / "data.parquet",
-                schema,
-                compression=self.compression
-            )
+            writer = self._new_writer(path, schema)
+            rows_in_file = 0
         else:
             table = pa.Table.from_pylist(buffer, schema=schema)
 
         for batch in table.to_batches():
             writer.write_batch(batch)
 
+        rows_in_file += len(buffer)
+
+        # Rotation fichier si trop gros
+        if rows_in_file >= self.row_group_size * 10:
+            writer.close()
+            writer = self._new_writer(path, schema)
+            rows_in_file = 0
+
         self.logger.info(
-            f"Wrote {len(buffer)} rows to {path / 'data.parquet'}"
+            f"Wrote {len(buffer)} rows to {path}"
         )
 
-        return writer, schema, len(buffer)
+        return writer, schema, len(buffer), rows_in_file
 
 
 # =====================================================

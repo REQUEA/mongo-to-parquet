@@ -28,6 +28,10 @@ class AppConfig:
         self.include_databases = set(self.raw.get("include_databases", []))
         self.exclude_databases = set(self.raw.get("exclude_databases", []))
 
+        self.batch_size = self.raw.get("bacth_size", 10_000)
+        self.row_group_size = self.raw.get("row_group_size", 400_000)
+
+
         if self.include_databases and self.exclude_databases:
             raise ValueError("Cannot specify both include_databases and exclude_databases")
 
@@ -79,12 +83,13 @@ class MongoConnection:
 # =====================================================
 
 class ParquetWriterService:
-    ROW_GROUP_SIZE = 400_000
+    #ROW_GROUP_SIZE = 400_000
 
-    def __init__(self, output_dir, compression, logger):
+    def __init__(self, output_dir, compression, logger, row_group_size):
         self.output_dir = output_dir
         self.compression = compression
         self.logger = logger
+        self.ROW_GROUP_SIZE = row_group_size
 
     def _enrich_partitions(self, doc, date_field):
         if not date_field:
@@ -141,7 +146,9 @@ class ExportJob:
         self.cfg = cfg
         self.mongo = mongo
         self.logger = logger
-        self.writer = ParquetWriterService(cfg.output_dir, cfg.compression, logger)
+        self.BATCH_SIZE = cfg.batch_size
+        self.ROW_GROUP_SIZE = cfg.row_group_size
+        self.writer = ParquetWriterService(cfg.output_dir, cfg.compression, logger, self.ROW_GROUP_SIZE)
 
     def run(self):
         all_db_names = set(self.mongo.list_databases())
@@ -194,7 +201,7 @@ class ExportJob:
             cursor = db[coll_name].find(
                 query,
                 no_cursor_timeout=True,
-                batch_size=10_000,
+                batch_size=self.BATCH_SIZE,
                 session=session
             )
             try:

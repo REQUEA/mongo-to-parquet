@@ -83,13 +83,11 @@ class MongoConnection:
 # =====================================================
 
 class ParquetWriterService:
-    #ROW_GROUP_SIZE = 400_000
-
     def __init__(self, output_dir, compression, logger, row_group_size):
         self.output_dir = output_dir
         self.compression = compression
         self.logger = logger
-        self.ROW_GROUP_SIZE = row_group_size
+        self.row_group_size = row_group_size
 
     def _enrich_partitions(self, doc, date_field):
         if not date_field:
@@ -106,6 +104,7 @@ class ParquetWriterService:
         base_path.mkdir(parents=True, exist_ok=True)
 
         buffer = []
+        writer = None
         schema = None
         total = 0
 
@@ -114,28 +113,46 @@ class ParquetWriterService:
             doc = self._enrich_partitions(doc, date_field)
             buffer.append(doc)
 
-            if len(buffer) >= self.ROW_GROUP_SIZE:
-                total += self._flush(buffer, base_path, schema)
-                schema = schema or pa.Table.from_pylist(buffer).schema
+            if len(buffer) >= self.row_group_size:
+                writer, schema, written = self._flush(
+                    buffer, base_path, writer, schema
+                )
+                total += written
                 buffer.clear()
 
         if buffer:
-            total += self._flush(buffer, base_path, schema)
+            writer, schema, written = self._flush(
+                buffer, base_path, writer, schema
+            )
+            total += written
+
+        if writer:
+            writer.close()
 
         return total
 
-    def _flush(self, buffer, path, schema):
-        table = pa.Table.from_pylist(buffer, schema=schema)
-        filename = f"part-{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.parquet"
 
-        pq.write_table(
-            table,
-            path / filename,
-            compression=self.compression
+    def _flush(self, buffer, path, writer, schema):
+        if schema is None:
+            table = pa.Table.from_pylist(buffer)
+            schema = table.schema
+            writer = pq.ParquetWriter(
+                path / "data.parquet",
+                schema,
+                compression=self.compression
+            )
+        else:
+            table = pa.Table.from_pylist(buffer, schema=schema)
+
+        for batch in table.to_batches():
+            writer.write_batch(batch)
+
+        self.logger.info(
+            f"Wrote {len(buffer)} rows to {path / 'data.parquet'}"
         )
 
-        self.logger.info(f"Wrote {len(buffer)} rows to {path / filename}")
-        return len(buffer)
+        return writer, schema, len(buffer)
+
 
 # =====================================================
 # EXPORT JOB

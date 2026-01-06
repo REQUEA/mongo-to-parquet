@@ -100,45 +100,105 @@ class ParquetWriterService:
         return doc
 
     def write_collection(self, cursor, db_name, collection_name, date_field):
-        base_path = Path(self.output_dir) / db_name / collection_name
-        base_path.mkdir(parents=True, exist_ok=True)
-
-        buffer = []
-        writer = None
-        schema = None
+        writers = {}
         total = 0
-        rows_in_file = 0
-
+    
         for doc in cursor:
             doc.pop("_id", None)
             doc = self._enrich_partitions(doc, date_field)
-            buffer.append(doc)
-
-            if len(buffer) >= self.row_group_size:
-                writer, schema, written, rows_in_file = self._flush(
-                    buffer,
-                    base_path,
-                    writer,
-                    schema,
-                    rows_in_file
+    
+            year = doc.get("year", "unknown")
+    
+            base_path = (
+                Path(self.output_dir)
+                / db_name
+                / collection_name
+                / f"year={year}"
+            )
+            base_path.mkdir(parents=True, exist_ok=True)
+    
+            if year not in writers:
+                writers[year] = {
+                    "buffer": [],
+                    "writer": None,
+                    "schema": None,
+                    "rows": 0,
+                    "path": base_path
+                }
+    
+            writers[year]["buffer"].append(doc)
+    
+            if len(writers[year]["buffer"]) >= self.row_group_size:
+                w = writers[year]
+                w["writer"], w["schema"], written, w["rows"] = self._flush(
+                    w["buffer"],
+                    w["path"],
+                    w["writer"],
+                    w["schema"],
+                    w["rows"]
                 )
                 total += written
-                buffer.clear()
-
-        if buffer:
-            writer, schema, written, rows_in_file = self._flush(
-                buffer,
-                base_path,
-                writer,
-                schema,
-                rows_in_file
-            )
-            total += written
-
-        if writer:
-            writer.close()
-
+                w["buffer"].clear()
+    
+        # flush final
+        for w in writers.values():
+            if w["buffer"]:
+                w["writer"], w["schema"], written, w["rows"] = self._flush(
+                    w["buffer"],
+                    w["path"],
+                    w["writer"],
+                    w["schema"],
+                    w["rows"]
+                )
+                total += written
+    
+            if w["writer"]:
+                w["writer"].close()
+    
         return total
+
+
+
+#    def write_collection(self, cursor, db_name, collection_name, date_field):
+#        base_path = Path(self.output_dir) / db_name / collection_name
+#        base_path.mkdir(parents=True, exist_ok=True)
+#
+#        buffer = []
+#        writer = None
+#        schema = None
+#        total = 0
+#        rows_in_file = 0
+#
+#        for doc in cursor:
+#            doc.pop("_id", None)
+#            doc = self._enrich_partitions(doc, date_field)
+#            buffer.append(doc)
+#
+#            if len(buffer) >= self.row_group_size:
+#                writer, schema, written, rows_in_file = self._flush(
+#                    buffer,
+#                    base_path,
+#                    writer,
+#                    schema,
+#                    rows_in_file
+#                )
+#                total += written
+#                buffer.clear()
+#
+#        if buffer:
+#            writer, schema, written, rows_in_file = self._flush(
+#                buffer,
+#                base_path,
+#                writer,
+#                schema,
+#                rows_in_file
+#            )
+#            total += written
+#
+#        if writer:
+#            writer.close()
+#
+#        return total
 
     def _new_writer(self, path, schema):
         filename = f"part-{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.parquet"
@@ -162,7 +222,6 @@ class ParquetWriterService:
 
         rows_in_file += len(buffer)
 
-        # Rotation fichier si trop gros
         if rows_in_file >= self.row_group_size * 10:
             writer.close()
             writer = self._new_writer(path, schema)

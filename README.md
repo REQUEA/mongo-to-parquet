@@ -3,13 +3,5 @@ Copy data from mongodb to parquet files
 
 ## Installation
 ```bash
-```bash
 uv pip install -p 3.13 "git+https://github.com/REQUEA/mongo-to-parquet.git"
-```
-```
-```
-```
-```
-
-```
 ```

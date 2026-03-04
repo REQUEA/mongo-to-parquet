@@ -1,0 +1,87 @@
+# mongodb-to-parquet — example configuration
+# ============================================
+# Pass this file with: mongo-to-parquet --config config.yaml
+# CLI flags always override values set here.
+# Required fields: mongodb.uri, export.collections, export.output_dir
+
+mongodb:
+  # [REQUIRED] MongoDB connection URI (or use --uri / MONGO_URI env var)
+  uri: "mongodb://user:password@localhost:27017/admin"
+
+  # Read from secondaries to reduce load on the primary (default: secondaryPreferred)
+  # Options: primary | primaryPreferred | secondary | secondaryPreferred | nearest
+  read_preference: "secondaryPreferred"
+
+  # Milliseconds to wait when establishing a connection (default: 30000)
+  connection_timeout_ms: 30000
+
+  # Milliseconds to wait for a socket operation; increase for large collections (default: 60000)
+  socket_timeout_ms: 60000
+
+  # Maximum number of connections in the pool (default: 10)
+  max_pool_size: 10
+
+
+export:
+  # [REQUIRED] Root directory where Parquet files will be written (or use --output-dir / OUTPUT_DIR)
+  output_dir: "./output"
+
+  # [REQUIRED] Collections to export (or use --collections / -c)
+  collections:
+    - "orders"
+    - "users"
+
+  # Databases to include; omit (or set to null) to export all non-system databases
+  databases:
+    - "my_db"
+
+  # Custom partition path template. Available variables:
+  #   {database}, {collection}, {year}, {month}, {day}, {hour}
+  # Default when null: {database}/{collection}/{year}/{month}/{day}
+  partition_pattern: null  # e.g. "{database}/{collection}/{year}-{month}"
+
+  # MongoDB cursor batch size (default: 1000)
+  batch_size: 1000
+
+  # Parquet compression codec: snappy | gzip | zstd (default: zstd)
+  compression: "zstd"
+
+  # Parquet compression level for zstd: between -7 and 22 (default: 3)
+  compression_level: 3
+
+  # Overwrite existing Parquet files (default: false — safer for incremental runs)
+  overwrite: false
+
+  # Simulate the export without writing any files (default: false)
+  dry_run: false
+
+
+filters:
+  # Document field used for date-based partitioning and optional date range filtering.
+  # Omit if your collection has no date field.
+  date_field: "created_at"
+
+  # Inclusive start date (ISO 8601). Requires date_field.
+  start_date: "2024-01-01"
+
+  # Inclusive end date (ISO 8601). Requires date_field.
+  end_date: "2024-12-31"
+
+
+transformer:
+  # Maximum nesting depth to flatten in documents (default: 2)
+  flatten_depth: 2
+
+  # What to do when a document's schema drifts from the first batch:
+  #   merge  — union schemas: add new fields, pad missing ones with nulls (default)
+  #   log    — keep exporting, log a warning, write table with its own schema
+  #   strict — raise an error and stop the export
+  on_schema_drift: "merge"
+
+
+logging:
+  # Log level: DEBUG | INFO | WARNING | ERROR (default: INFO)
+  level: "INFO"
+
+  # Output format: text (human-readable) | json (for log aggregators) (default: text)
+  format: "text"

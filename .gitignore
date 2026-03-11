@@ -59,3 +59,4 @@ htmlcov/
 .claude/
 CLAUDE.md
 config.yaml
+.grepai/

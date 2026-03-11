@@ -84,6 +84,16 @@ def export(
     dry_run: Optional[bool] = typer.Option(
         None, help="Simulate without writing any files (default: false)"
     ),
+    iceberg: bool = typer.Option(False, "--iceberg", help="Write to Iceberg table (REST catalog)"),
+    catalog_uri: Optional[str] = typer.Option(
+        None, "--catalog-uri", envvar="MTP_CATALOG_URI", help="Iceberg REST catalog URI"
+    ),
+    warehouse: Optional[str] = typer.Option(
+        None, "--warehouse", envvar="MTP_WAREHOUSE",
+        help="S3 warehouse URI, e.g. s3://bucket/warehouse",
+    ),
+    namespace: str = typer.Option("default", "--namespace", envvar="MTP_NAMESPACE",
+                                  help="Iceberg namespace (default: default)"),
     log_level: Optional[str] = typer.Option(None, envvar="LOG_LEVEL"),
     log_format: Optional[str] = typer.Option(None, envvar="LOG_FORMAT"),
 ) -> None:
@@ -99,6 +109,7 @@ def export(
     filters_cfg = cfg.get("filters", {})
     transformer_cfg = cfg.get("transformer", {})
     logging_cfg = cfg.get("logging", {})
+    iceberg_cfg = cfg.get("iceberg", {})
 
     # Required values: CLI → config → None (validated below)
     uri = uri or mongo_cfg.get("uri")
@@ -106,6 +117,12 @@ def export(
     output_dir = output_dir or (
         Path(export_cfg["output_dir"]) if "output_dir" in export_cfg else None
     )
+
+    # Iceberg options: CLI → config
+    iceberg = iceberg or iceberg_cfg.get("enabled", False)
+    catalog_uri = catalog_uri or iceberg_cfg.get("catalog_uri")
+    warehouse = warehouse or iceberg_cfg.get("warehouse")
+    namespace = namespace if namespace != "default" else iceberg_cfg.get("namespace", namespace)
 
     # Optional values: CLI → config → hardcoded default
     databases = databases or export_cfg.get("databases")
@@ -144,15 +161,29 @@ def export(
             err=True,
         )
         raise typer.Exit(2)
-    if not output_dir:
-        typer.echo(
-            "Error: --output-dir is required (or set export.output_dir in config file)",
-            err=True,
-        )
-        raise typer.Exit(2)
+    if iceberg:
+        if not catalog_uri:
+            typer.echo("Error: --catalog-uri is required in Iceberg mode", err=True)
+            raise typer.Exit(2)
+        if not warehouse:
+            typer.echo("Error: --warehouse is required in Iceberg mode", err=True)
+            raise typer.Exit(2)
+    else:
+        if not output_dir:
+            typer.echo(
+                "Error: --output-dir is required (or set export.output_dir in config file)",
+                err=True,
+            )
+            raise typer.Exit(2)
 
     setup_logging(log_level, log_format)
     logger = _sl.get_logger()
+
+    if iceberg and partition_pattern:
+        logger.warning(
+            "iceberg_mode_ignores_partition_pattern",
+            msg="--partition-pattern is ignored in Iceberg mode",
+        )
 
     # ------------------------------------------------------------------
     # Validate mutually-dependent options
@@ -201,13 +232,17 @@ def export(
         flatten_depth=flatten_depth,
         on_schema_drift=on_schema_drift,
     )
-    writer = ParquetWriter(
-        output_dir=output_dir,
-        compression=compression,
-        compression_level=compression_level,
-        overwrite=overwrite,
-        partition_pattern=partition_pattern,
-    )
+    if iceberg:
+        from .iceberg_writer import IcebergWriter
+        writer = IcebergWriter(catalog_uri, warehouse, namespace)
+    else:
+        writer = ParquetWriter(
+            output_dir=output_dir,
+            compression=compression,
+            compression_level=compression_level,
+            overwrite=overwrite,
+            partition_pattern=partition_pattern,
+        )
 
     total_docs = 0
     total_files = 0
@@ -259,6 +294,8 @@ def export(
                         d, f = _flush_batch(
                             batch, last_date, transformer, writer,
                             db_name, col_name, dry_run, logger,
+                            date_field=date_field if iceberg else None,
+                            use_iceberg=iceberg,
                         )
                         total_docs += d
                         total_files += f
@@ -269,6 +306,8 @@ def export(
                     d, f = _flush_batch(
                         batch, last_date, transformer, writer,
                         db_name, col_name, dry_run, logger,
+                        date_field=date_field if iceberg else None,
+                        use_iceberg=iceberg,
                     )
                     total_docs += d
                     total_files += f
@@ -309,17 +348,28 @@ def _flush_batch(
     batch: list,
     last_date: Optional[datetime],
     transformer: DocumentTransformer,
-    writer: ParquetWriter,
+    writer,
     db_name: str,
     col_name: str,
     dry_run: bool,
     logger,
+    *,
+    date_field: Optional[str] = None,
+    use_iceberg: bool = False,
 ) -> tuple[int, int]:
-    """Transform a batch of documents, write to Parquet, return (docs, files)."""
+    """Transform a batch of documents, write to Parquet or Iceberg, return (docs, files)."""
     table = transformer.to_arrow(batch)
     # Free the Python dicts immediately after the Arrow table is built so the
     # batch list and the columnar table do not coexist in memory during the write.
     batch.clear()
+
+    if use_iceberg:
+        if dry_run:
+            logger.info("dry_run_batch", mode="iceberg", rows=len(table))
+            return len(table), 0
+        writer.write(table, db_name, col_name, date_field=date_field)
+        return len(table), 1
+
     partition_path = writer.get_partition_path(db_name, col_name, last_date)
 
     if dry_run:

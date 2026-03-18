@@ -71,7 +71,9 @@ class TestIcebergWriterInit:
         catalog.create_namespace.return_value = None  # success
 
         with patch("mongodb_to_parquet.iceberg_writer.load_catalog", return_value=catalog):
-            IcebergWriter("http://nessie/api", "s3://bkt/wh", namespace="new_ns")
+            IcebergWriter("http://nessie/api", "s3://bkt/wh", namespace="new_ns",
+                          credential="id:secret", scope="PRINCIPAL_ROLE:ALL",
+                          extra_headers={"Polaris-Realm": "test"})
 
         catalog.create_namespace.assert_called_once_with("new_ns")
 

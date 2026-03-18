@@ -28,15 +28,24 @@ class IcebergWriter:
         catalog_uri: str,
         warehouse: str,
         namespace: str = "default",
+        credential: Optional[str] = None,
+        scope: Optional[str] = None,
+        extra_headers: Optional[dict[str, str]] = None,
     ) -> None:
-        self.catalog = load_catalog(
-            "rest",
-            **{
-                "type": "rest",
-                "uri": catalog_uri,
-                "warehouse": warehouse,
-            },
-        )
+        catalog_props: dict[str, str] = {
+            "type": "rest",
+            "uri": catalog_uri,
+            "warehouse": warehouse,
+        }
+        if credential:
+            catalog_props["credential"] = credential
+        if scope:
+            catalog_props["scope"] = scope
+        if extra_headers:
+            for key, value in extra_headers.items():
+                catalog_props[f"header.{key}"] = value
+
+        self.catalog = load_catalog("rest", **catalog_props)
         self.namespace = namespace
         self.log = log.bind(component="iceberg_writer")
         self._ensure_namespace()

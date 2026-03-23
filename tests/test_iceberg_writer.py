@@ -1,7 +1,7 @@
 """Unit tests for IcebergWriter (mocked REST catalog)."""
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 import pytest
 import pyarrow as pa
 
@@ -42,7 +42,6 @@ def mock_catalog():
     """Return a mock Iceberg catalog."""
     from pyiceberg.exceptions import NamespaceAlreadyExistsError
     catalog = MagicMock()
-    # Namespace already exists by default → raise NamespaceAlreadyExistsError
     catalog.create_namespace.side_effect = NamespaceAlreadyExistsError("default")
     return catalog
 
@@ -53,7 +52,7 @@ def writer(mock_catalog):
     from mongodb_to_parquet.iceberg_writer import IcebergWriter
     with patch("mongodb_to_parquet.iceberg_writer.load_catalog", return_value=mock_catalog):
         w = IcebergWriter(
-            catalog_uri="http://localhost:19120/api/v1",
+            catalog_uri="http://localhost:19120/iceberg",
             warehouse="s3://bucket/warehouse",
             namespace="test_ns",
         )
@@ -71,13 +70,11 @@ class TestIcebergWriterInit:
         catalog.create_namespace.return_value = None  # success
 
         with patch("mongodb_to_parquet.iceberg_writer.load_catalog", return_value=catalog):
-            IcebergWriter("http://nessie/api", "s3://bkt/wh", namespace="new_ns")
+            IcebergWriter("http://nessie/iceberg", "s3://bkt/wh", namespace="new_ns")
 
         catalog.create_namespace.assert_called_once_with("new_ns")
 
     def test_tolerates_existing_namespace(self, writer):
-        # Fixture already exercises the NamespaceAlreadyExistsError path;
-        # just assert the writer was created successfully.
         w, _ = writer
         assert w.namespace == "test_ns"
 
@@ -104,13 +101,12 @@ class TestIcebergWriterWrite:
         catalog.create_table.return_value = new_table
 
         arrow_table = _make_arrow_table()
-        iceberg_schema = _make_iceberg_schema(arrow_table.schema)
+        w.write(arrow_table, "mydb", "orders")
 
-        with patch("mongodb_to_parquet.iceberg_writer.pyarrow_to_schema") as MockSchema:
-            MockSchema.return_value = iceberg_schema
-            w.write(arrow_table, "mydb", "orders")
-
+        # Arrow schema passed directly to create_table
         catalog.create_table.assert_called_once()
+        call_kwargs = catalog.create_table.call_args
+        assert call_kwargs.kwargs["schema"] is arrow_table.schema
         new_table.append.assert_called_once_with(arrow_table)
 
     def test_creates_table_with_day_partition_when_date_field_found(self, writer):
@@ -121,22 +117,22 @@ class TestIcebergWriterWrite:
         new_table = MagicMock()
         catalog.create_table.return_value = new_table
 
+        # Mock table.schema() to return an iceberg schema with created_at
         arrow_table = _make_arrow_table(with_ts=True)
         iceberg_schema = _make_iceberg_schema(arrow_table.schema)
+        new_table.schema.return_value = iceberg_schema
 
-        with patch("mongodb_to_parquet.iceberg_writer.pyarrow_to_schema") as MockSchema, \
-             patch("mongodb_to_parquet.iceberg_writer.PartitionSpec") as MockPartitionSpec, \
-             patch("mongodb_to_parquet.iceberg_writer.PartitionField") as MockPartitionField:
-            MockSchema.return_value = iceberg_schema
-            MockPartitionField.return_value = MagicMock()
-            MockPartitionSpec.return_value = MagicMock()
+        # Mock update_spec context manager
+        update_mock = MagicMock()
+        new_table.update_spec.return_value.__enter__ = MagicMock(return_value=update_mock)
+        new_table.update_spec.return_value.__exit__ = MagicMock(return_value=False)
 
-            w.write(arrow_table, "mydb", "events", date_field="created_at")
+        w.write(arrow_table, "mydb", "events", date_field="created_at")
 
-        # PartitionField should have been instantiated (day transform)
-        MockPartitionField.assert_called_once()
-        call_kwargs = MockPartitionField.call_args
-        assert call_kwargs.kwargs.get("name") == "created_at_day"
+        # update_spec().add_field should have been called with the date field
+        update_mock.add_field.assert_called_once()
+        call_kwargs = update_mock.add_field.call_args
+        assert call_kwargs.kwargs.get("source_column_name") == "created_at"
 
     def test_creates_table_without_partition_when_date_field_missing_from_schema(self, writer):
         from pyiceberg.exceptions import NoSuchTableError
@@ -148,15 +144,12 @@ class TestIcebergWriterWrite:
 
         arrow_table = _make_arrow_table()  # no timestamp column
         iceberg_schema = _make_iceberg_schema(arrow_table.schema)
+        new_table.schema.return_value = iceberg_schema
 
-        with patch("mongodb_to_parquet.iceberg_writer.pyarrow_to_schema") as MockSchema, \
-             patch("mongodb_to_parquet.iceberg_writer.PartitionField") as MockPartitionField:
-            MockSchema.return_value = iceberg_schema
+        w.write(arrow_table, "mydb", "orders", date_field="nonexistent_field")
 
-            w.write(arrow_table, "mydb", "orders", date_field="nonexistent_field")
-
-        # PartitionField should NOT have been called because field is absent
-        MockPartitionField.assert_not_called()
+        # update_spec should NOT have been called because field is absent
+        new_table.update_spec.assert_not_called()
 
     def test_table_identifier_uses_double_underscore(self, writer):
         w, catalog = writer

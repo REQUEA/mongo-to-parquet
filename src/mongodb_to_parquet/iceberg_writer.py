@@ -7,8 +7,6 @@ import pyarrow as pa
 import structlog
 from pyiceberg.catalog import load_catalog
 from pyiceberg.exceptions import NamespaceAlreadyExistsError, NoSuchTableError
-from pyiceberg.partitioning import PartitionField, PartitionSpec
-from pyiceberg.io.pyarrow import pyarrow_to_schema
 from pyiceberg.transforms import DayTransform
 
 log = structlog.get_logger()
@@ -88,9 +86,18 @@ class IcebergWriter:
         except NoSuchTableError:
             pass
 
-        iceberg_schema = pyarrow_to_schema(arrow_schema)
+        # Create the table with the Arrow schema — pyiceberg converts it
+        # internally and assigns field IDs automatically.
+        table = self.catalog.create_table(
+            identifier=identifier,
+            schema=arrow_schema,
+        )
+        self.log.info("iceberg_table_created", identifier=identifier)
 
+        # Add day partitioning if requested (requires the Iceberg field ID
+        # that was assigned during create_table).
         if date_field:
+            iceberg_schema = table.schema()
             field_id = None
             for field in iceberg_schema.fields:
                 if field.name == date_field:
@@ -98,28 +105,17 @@ class IcebergWriter:
                     break
 
             if field_id is not None:
-                partition_spec = PartitionSpec(
-                    PartitionField(
-                        source_id=field_id,
-                        field_id=1000,
+                with table.update_spec() as update:
+                    update.add_field(
+                        source_column_name=date_field,
                         transform=DayTransform(),
-                        name=f"{date_field}_day",
                     )
-                )
+                self.log.info("iceberg_partition_added", date_field=date_field)
             else:
                 self.log.warning(
                     "iceberg_date_field_not_found",
                     date_field=date_field,
                     identifier=identifier,
                 )
-                partition_spec = PartitionSpec()
-        else:
-            partition_spec = PartitionSpec()
 
-        table = self.catalog.create_table(
-            identifier=identifier,
-            schema=iceberg_schema,
-            partition_spec=partition_spec,
-        )
-        self.log.info("iceberg_table_created", identifier=identifier)
         return table

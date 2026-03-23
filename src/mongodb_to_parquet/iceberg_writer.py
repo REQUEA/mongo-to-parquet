@@ -8,7 +8,7 @@ import structlog
 from pyiceberg.catalog import load_catalog
 from pyiceberg.exceptions import NamespaceAlreadyExistsError, NoSuchTableError
 from pyiceberg.partitioning import PartitionField, PartitionSpec
-from pyiceberg.schema import Schema
+from pyiceberg.io.pyarrow import pyarrow_to_schema
 from pyiceberg.transforms import DayTransform
 
 log = structlog.get_logger()
@@ -88,7 +88,7 @@ class IcebergWriter:
         except NoSuchTableError:
             pass
 
-        iceberg_schema = Schema.from_arrow(arrow_schema)
+        iceberg_schema = pyarrow_to_schema(arrow_schema)
 
         if date_field:
             field_id = None

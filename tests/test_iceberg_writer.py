@@ -106,8 +106,8 @@ class TestIcebergWriterWrite:
         arrow_table = _make_arrow_table()
         iceberg_schema = _make_iceberg_schema(arrow_table.schema)
 
-        with patch("mongodb_to_parquet.iceberg_writer.Schema") as MockSchema:
-            MockSchema.from_arrow.return_value = iceberg_schema
+        with patch("mongodb_to_parquet.iceberg_writer.pyarrow_to_schema") as MockSchema:
+            MockSchema.return_value = iceberg_schema
             w.write(arrow_table, "mydb", "orders")
 
         catalog.create_table.assert_called_once()
@@ -124,10 +124,10 @@ class TestIcebergWriterWrite:
         arrow_table = _make_arrow_table(with_ts=True)
         iceberg_schema = _make_iceberg_schema(arrow_table.schema)
 
-        with patch("mongodb_to_parquet.iceberg_writer.Schema") as MockSchema, \
+        with patch("mongodb_to_parquet.iceberg_writer.pyarrow_to_schema") as MockSchema, \
              patch("mongodb_to_parquet.iceberg_writer.PartitionSpec") as MockPartitionSpec, \
              patch("mongodb_to_parquet.iceberg_writer.PartitionField") as MockPartitionField:
-            MockSchema.from_arrow.return_value = iceberg_schema
+            MockSchema.return_value = iceberg_schema
             MockPartitionField.return_value = MagicMock()
             MockPartitionSpec.return_value = MagicMock()
 
@@ -149,9 +149,9 @@ class TestIcebergWriterWrite:
         arrow_table = _make_arrow_table()  # no timestamp column
         iceberg_schema = _make_iceberg_schema(arrow_table.schema)
 
-        with patch("mongodb_to_parquet.iceberg_writer.Schema") as MockSchema, \
+        with patch("mongodb_to_parquet.iceberg_writer.pyarrow_to_schema") as MockSchema, \
              patch("mongodb_to_parquet.iceberg_writer.PartitionField") as MockPartitionField:
-            MockSchema.from_arrow.return_value = iceberg_schema
+            MockSchema.return_value = iceberg_schema
 
             w.write(arrow_table, "mydb", "orders", date_field="nonexistent_field")
 

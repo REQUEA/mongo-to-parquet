@@ -16,7 +16,7 @@ dependencies = [
     "typer>=0.12.0",
     "structlog>=24.0.0",
     "pre-commit>=4.5.1",
-    "pyiceberg[pyarrow,s3]>=0.7.0",
+    "pyiceberg[pyarrow,s3fs]>=0.7.0",
 ]
 
 [project.optional-dependencies]

@@ -94,6 +94,10 @@ def export(
     ),
     namespace: str = typer.Option("default", "--namespace", envvar="MTP_NAMESPACE",
                                   help="Iceberg namespace (default: default)"),
+    s3_endpoint: Optional[str] = typer.Option(
+        None, "--s3-endpoint", envvar="MTP_S3_ENDPOINT",
+        help="S3-compatible endpoint URL (e.g. http://minio:9000)",
+    ),
     log_level: Optional[str] = typer.Option(None, envvar="LOG_LEVEL"),
     log_format: Optional[str] = typer.Option(None, envvar="LOG_FORMAT"),
 ) -> None:
@@ -123,6 +127,7 @@ def export(
     catalog_uri = catalog_uri or iceberg_cfg.get("catalog_uri")
     warehouse = warehouse or iceberg_cfg.get("warehouse")
     namespace = namespace if namespace != "default" else iceberg_cfg.get("namespace", namespace)
+    s3_endpoint = s3_endpoint or iceberg_cfg.get("s3_endpoint")
 
     # Optional values: CLI → config → hardcoded default
     databases = databases or export_cfg.get("databases")
@@ -238,6 +243,7 @@ def export(
             catalog_uri,
             warehouse,
             namespace,
+            s3_endpoint=s3_endpoint,
         )
     else:
         writer = ParquetWriter(

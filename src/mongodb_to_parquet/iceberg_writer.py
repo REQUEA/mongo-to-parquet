@@ -27,12 +27,15 @@ class IcebergWriter:
         catalog_uri: str,
         warehouse: str,
         namespace: str = "default",
+        s3_endpoint: Optional[str] = None,
     ) -> None:
         catalog_props: dict[str, str] = {
             "type": "rest",
             "uri": catalog_uri,
             "warehouse": warehouse,
         }
+        if s3_endpoint:
+            catalog_props["s3.endpoint"] = s3_endpoint
 
         self.catalog = load_catalog("rest", **catalog_props)
         self.namespace = namespace
@@ -54,7 +57,7 @@ class IcebergWriter:
 
         Creates the Iceberg table (with schema and partition spec) on first write.
         """
-        identifier = f"{self.namespace}.{database}__{collection}"
+        identifier = f"{self.namespace}.{database}__{collection.lower()}"
 
         table = self._get_or_create_table(identifier, arrow_table.schema, date_field)
         self._evolve_schema(table, arrow_table.schema)

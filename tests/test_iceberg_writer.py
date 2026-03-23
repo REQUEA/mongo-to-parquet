@@ -166,7 +166,20 @@ class TestIcebergWriterWrite:
 
         w.write(arrow_table, "production_db", "user_events")
 
+        # Collection name is lowercased in the identifier
         catalog.load_table.assert_called_once_with("test_ns.production_db__user_events")
+
+    def test_collection_name_is_lowercased(self, writer):
+        w, catalog = writer
+        table_mock = MagicMock()
+        catalog.load_table.return_value = table_mock
+
+        arrow_table = _make_arrow_table()
+        table_mock.schema.return_value = _make_iceberg_schema(arrow_table.schema)
+
+        w.write(arrow_table, "mydb", "IotDeviceMessage")
+
+        catalog.load_table.assert_called_once_with("test_ns.mydb__iotdevicemessage")
 
     def test_schema_evolution_on_new_columns(self, writer):
         """When a batch has extra columns, update_schema + union_by_name is called."""

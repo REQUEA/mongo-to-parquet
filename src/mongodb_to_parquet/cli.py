@@ -94,14 +94,6 @@ def export(
     ),
     namespace: str = typer.Option("default", "--namespace", envvar="MTP_NAMESPACE",
                                   help="Iceberg namespace (default: default)"),
-    credential: Optional[str] = typer.Option(
-        None, "--credential", envvar="MTP_CREDENTIAL",
-        help="Polaris OAuth2 credential (client_id:client_secret)",
-    ),
-    scope: Optional[str] = typer.Option(
-        None, "--scope", envvar="MTP_SCOPE",
-        help="Polaris OAuth2 scope (e.g. PRINCIPAL_ROLE:ALL)",
-    ),
     log_level: Optional[str] = typer.Option(None, envvar="LOG_LEVEL"),
     log_format: Optional[str] = typer.Option(None, envvar="LOG_FORMAT"),
 ) -> None:
@@ -131,15 +123,6 @@ def export(
     catalog_uri = catalog_uri or iceberg_cfg.get("catalog_uri")
     warehouse = warehouse or iceberg_cfg.get("warehouse")
     namespace = namespace if namespace != "default" else iceberg_cfg.get("namespace", namespace)
-    credential = credential or iceberg_cfg.get("credential")
-    scope = scope or iceberg_cfg.get("scope")
-
-    # Collect header.* keys from iceberg config (e.g. header.Polaris-Realm)
-    extra_headers: dict[str, str] = {}
-    for key, value in iceberg_cfg.items():
-        if key.startswith("header."):
-            header_name = key[len("header."):]
-            extra_headers[header_name] = str(value)
 
     # Optional values: CLI → config → hardcoded default
     databases = databases or export_cfg.get("databases")
@@ -255,9 +238,6 @@ def export(
             catalog_uri,
             warehouse,
             namespace,
-            credential=credential,
-            scope=scope,
-            extra_headers=extra_headers or None,
         )
     else:
         writer = ParquetWriter(

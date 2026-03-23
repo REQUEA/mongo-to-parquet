@@ -1,4 +1,4 @@
-"""Iceberg writer — writes Arrow tables to an Iceberg REST catalog (e.g. Nessie, Polaris)."""
+"""Iceberg writer — writes Arrow tables to an Iceberg REST catalog (Nessie, no auth)."""
 from __future__ import annotations
 
 from typing import Optional
@@ -19,6 +19,7 @@ class IcebergWriter:
 
     Table naming: ``{namespace}.{database}__{collection}`` (double underscore).
     Partitioning: ``day(date_field)`` when *date_field* is provided.
+    Connects to Nessie without authentication.
     S3 credentials are resolved via the standard boto3 chain
     (env vars, IAM role, ``~/.aws/credentials``).
     """
@@ -28,22 +29,12 @@ class IcebergWriter:
         catalog_uri: str,
         warehouse: str,
         namespace: str = "default",
-        credential: Optional[str] = None,
-        scope: Optional[str] = None,
-        extra_headers: Optional[dict[str, str]] = None,
     ) -> None:
         catalog_props: dict[str, str] = {
             "type": "rest",
             "uri": catalog_uri,
             "warehouse": warehouse,
         }
-        if credential:
-            catalog_props["credential"] = credential
-        if scope:
-            catalog_props["scope"] = scope
-        if extra_headers:
-            for key, value in extra_headers.items():
-                catalog_props[f"header.{key}"] = value
 
         self.catalog = load_catalog("rest", **catalog_props)
         self.namespace = namespace

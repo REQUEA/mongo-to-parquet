@@ -57,6 +57,7 @@ class IcebergWriter:
         identifier = f"{self.namespace}.{database}__{collection}"
 
         table = self._get_or_create_table(identifier, arrow_table.schema, date_field)
+        self._evolve_schema(table, arrow_table.schema)
         table.append(arrow_table)
 
         self.log.info(
@@ -68,6 +69,21 @@ class IcebergWriter:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _evolve_schema(self, table, arrow_schema: pa.Schema) -> None:
+        """Add any new columns from *arrow_schema* that are missing in the Iceberg table."""
+        iceberg_names = {field.name for field in table.schema().fields}
+        new_columns = [f.name for f in arrow_schema if f.name not in iceberg_names]
+        if not new_columns:
+            return
+
+        with table.update_schema() as update:
+            update.union_by_name(arrow_schema)
+
+        self.log.info(
+            "iceberg_schema_evolved",
+            new_fields=new_columns,
+        )
 
     def _ensure_namespace(self) -> None:
         try:

@@ -86,6 +86,9 @@ class TestIcebergWriterWrite:
         catalog.load_table.return_value = table_mock
 
         arrow_table = _make_arrow_table()
+        # schema() returns fields matching the arrow table (no evolution needed)
+        table_mock.schema.return_value = _make_iceberg_schema(arrow_table.schema)
+
         w.write(arrow_table, "mydb", "orders")
 
         catalog.load_table.assert_called_once_with("test_ns.mydb__orders")
@@ -101,12 +104,14 @@ class TestIcebergWriterWrite:
         catalog.create_table.return_value = new_table
 
         arrow_table = _make_arrow_table()
+        new_table.schema.return_value = _make_iceberg_schema(arrow_table.schema)
+
         w.write(arrow_table, "mydb", "orders")
 
         # Arrow schema passed directly to create_table
         catalog.create_table.assert_called_once()
         call_kwargs = catalog.create_table.call_args
-        assert call_kwargs.kwargs["schema"] is arrow_table.schema
+        assert call_kwargs.kwargs["schema"] == arrow_table.schema
         new_table.append.assert_called_once_with(arrow_table)
 
     def test_creates_table_with_day_partition_when_date_field_found(self, writer):
@@ -156,6 +161,33 @@ class TestIcebergWriterWrite:
         table_mock = MagicMock()
         catalog.load_table.return_value = table_mock
 
-        w.write(_make_arrow_table(), "production_db", "user_events")
+        arrow_table = _make_arrow_table()
+        table_mock.schema.return_value = _make_iceberg_schema(arrow_table.schema)
+
+        w.write(arrow_table, "production_db", "user_events")
 
         catalog.load_table.assert_called_once_with("test_ns.production_db__user_events")
+
+    def test_schema_evolution_on_new_columns(self, writer):
+        """When a batch has extra columns, update_schema + union_by_name is called."""
+        w, catalog = writer
+        table_mock = MagicMock()
+        catalog.load_table.return_value = table_mock
+
+        # Iceberg table only knows about "id" and "value"
+        base_schema = pa.schema([("id", pa.int64()), ("value", pa.string())])
+        table_mock.schema.return_value = _make_iceberg_schema(base_schema)
+
+        # Incoming batch has an extra "new_col" column
+        extended_table = pa.table({
+            "id": [1], "value": ["a"], "new_col": ["x"],
+        })
+
+        update_mock = MagicMock()
+        table_mock.update_schema.return_value.__enter__ = MagicMock(return_value=update_mock)
+        table_mock.update_schema.return_value.__exit__ = MagicMock(return_value=False)
+
+        w.write(extended_table, "mydb", "orders")
+
+        update_mock.union_by_name.assert_called_once()
+        table_mock.append.assert_called_once_with(extended_table)

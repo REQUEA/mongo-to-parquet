@@ -91,6 +91,10 @@ def export(
         None, "--write-workers", envvar="MTP_WRITE_WORKERS",
         help="Number of parallel write threads (default: 2)",
     ),
+    collection_workers: Optional[int] = typer.Option(
+        None, "--collection-workers", envvar="MTP_COLLECTION_WORKERS",
+        help="Number of collections to export in parallel (default: 1)",
+    ),
     catalog_uri: Optional[str] = typer.Option(
         None, "--catalog-uri", envvar="MTP_CATALOG_URI", help="Iceberg REST catalog URI"
     ),
@@ -159,6 +163,7 @@ def export(
     partition_pattern = partition_pattern or export_cfg.get("partition_pattern")
 
     write_workers = write_workers if write_workers is not None else export_cfg.get("write_workers", 2)
+    collection_workers = collection_workers if collection_workers is not None else export_cfg.get("collection_workers", 1)
     batch_size = batch_size if batch_size is not None else export_cfg.get("batch_size", 1000)
     compression = compression if compression is not None else export_cfg.get("compression", "zstd")
     compression_level = compression_level if compression_level is not None else export_cfg.get("compression_level", 3)
@@ -256,10 +261,6 @@ def export(
         read_preference=read_preference,
         max_pool_size=max_pool_size,
     )
-    transformer = DocumentTransformer(
-        flatten_depth=flatten_depth,
-        on_schema_drift=on_schema_drift,
-    )
     if iceberg:
         from .iceberg_writer import IcebergWriter
         writer = IcebergWriter(
@@ -292,110 +293,48 @@ def export(
             logger.warning("no_databases_found")
             raise typer.Exit(0)
 
+        # Build list of (db, collection) pairs to export
+        tasks: list[tuple[str, str]] = []
         for db_name in dbs:
             cols = extractor.list_collections(db_name, include=list(collections))
-
             for col_name in cols:
-                if date_field:
-                    extractor.check_date_index(db_name, col_name, date_field)
+                tasks.append((db_name, col_name))
 
-                logger.info("export_start", database=db_name, collection=col_name)
+        def _export_collection(db_col: tuple[str, str]) -> tuple[int, int, int]:
+            """Export a single collection. Returns (docs, files, skipped)."""
+            db_n, col_n = db_col
+            return _process_collection(
+                extractor=extractor,
+                transformer=DocumentTransformer(
+                    flatten_depth=flatten_depth,
+                    on_schema_drift=on_schema_drift,
+                ),
+                writer=writer,
+                db_name=db_n,
+                col_name=col_n,
+                query=query,
+                date_field=date_field,
+                batch_size=batch_size,
+                dry_run=dry_run,
+                iceberg=iceberg,
+                no_resume=no_resume,
+                write_workers=write_workers,
+                logger=logger,
+            )
 
-                # In Iceberg mode, resume from the last written date to
-                # avoid re-processing documents already in the table.
-                col_query = dict(query)
-                if iceberg and date_field and not no_resume:
-                    resume_date = writer.get_resume_date(db_name, col_name, date_field)
-                    if resume_date:
-                        existing_filter = col_query.get(date_field, {})
-                        existing_filter["$gt"] = resume_date
-                        col_query[date_field] = existing_filter
-                        logger.info(
-                            "resuming_export",
-                            database=db_name,
-                            collection=col_name,
-                            resume_after=str(resume_date),
-                        )
-
-                batch: list = []
-                last_date: Optional[datetime] = None
-                pending_futures: list[Future] = []
-
-                # Iceberg commits must be serialized (snapshot conflicts);
-                # parallelism only helps for local Parquet file writes.
-                effective_workers = 1 if iceberg else write_workers
-
-                with ThreadPoolExecutor(max_workers=effective_workers) as pool:
-                    for doc in extractor.stream(db_name, col_name, col_query, batch_size=batch_size):
-                        # Capture partition date from raw doc before transform
-                        if date_field and date_field in doc:
-                            raw_val = doc[date_field]
-                            if isinstance(raw_val, datetime):
-                                last_date = (
-                                    raw_val.replace(tzinfo=timezone.utc)
-                                    if raw_val.tzinfo is None
-                                    else raw_val
-                                )
-
-                        try:
-                            batch.append(transformer.transform(doc))
-                        except Exception as exc:
-                            skip_count += 1
-                            logger.warning(
-                                "doc_transform_failed",
-                                error=str(exc),
-                                skip_count=skip_count,
-                            )
-                            continue
-
-                        if len(batch) >= batch_size:
-                            # Wait for the previous write before submitting a
-                            # new one (keeps 1 write in flight while we extract
-                            # the next batch from MongoDB).
-                            for fut in pending_futures:
-                                d, f = fut.result()
-                                total_docs += d
-                                total_files += f
-                            pending_futures.clear()
-
-                            fut = _submit_flush(
-                                pool, batch, last_date, transformer, writer,
-                                db_name, col_name, dry_run, logger,
-                                date_field=date_field if iceberg else None,
-                                use_iceberg=iceberg,
-                            )
-                            pending_futures.append(fut)
-                            batch = []
-                            last_date = None
-
-                    # Flush remaining documents
-                    if batch:
-                        for fut in pending_futures:
-                            d, f = fut.result()
-                            total_docs += d
-                            total_files += f
-                        pending_futures.clear()
-
-                        fut = _submit_flush(
-                            pool, batch, last_date, transformer, writer,
-                            db_name, col_name, dry_run, logger,
-                            date_field=date_field if iceberg else None,
-                            use_iceberg=iceberg,
-                        )
-                        pending_futures.append(fut)
-
-                    # Wait for all writes to complete
-                    for fut in pending_futures:
-                        d, f = fut.result()
-                        total_docs += d
-                        total_files += f
-
-                logger.info(
-                    "export_done",
-                    database=db_name,
-                    collection=col_name,
-                    docs=total_docs,
-                )
+        if collection_workers > 1 and len(tasks) > 1:
+            logger.info("parallel_collections", workers=collection_workers, collections=len(tasks))
+            with ThreadPoolExecutor(max_workers=collection_workers) as col_pool:
+                for d, f, s in col_pool.map(_export_collection, tasks):
+                    total_docs += d
+                    total_files += f
+                    skip_count += s
+        else:
+            for task in tasks:
+                d, f, s = _export_collection(task)
+                total_docs += d
+                total_files += f
+                skip_count += s
 
     except (typer.Exit, KeyboardInterrupt):
         raise
@@ -420,6 +359,119 @@ def export(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _process_collection(
+    extractor,
+    transformer: DocumentTransformer,
+    writer,
+    db_name: str,
+    col_name: str,
+    query: dict,
+    date_field: Optional[str],
+    batch_size: int,
+    dry_run: bool,
+    iceberg: bool,
+    no_resume: bool,
+    write_workers: int,
+    logger,
+) -> tuple[int, int, int]:
+    """Export a single collection. Returns (docs, files, skipped)."""
+    if date_field:
+        extractor.check_date_index(db_name, col_name, date_field)
+
+    logger.info("export_start", database=db_name, collection=col_name)
+
+    col_query = dict(query)
+    if iceberg and date_field and not no_resume:
+        resume_date = writer.get_resume_date(db_name, col_name, date_field)
+        if resume_date:
+            existing_filter = col_query.get(date_field, {})
+            existing_filter["$gt"] = resume_date
+            col_query[date_field] = existing_filter
+            logger.info(
+                "resuming_export",
+                database=db_name,
+                collection=col_name,
+                resume_after=str(resume_date),
+            )
+
+    col_docs = 0
+    col_files = 0
+    col_skipped = 0
+    batch: list = []
+    last_date: Optional[datetime] = None
+    pending_futures: list[Future] = []
+
+    effective_workers = 1 if iceberg else write_workers
+
+    with ThreadPoolExecutor(max_workers=effective_workers) as pool:
+        for doc in extractor.stream(db_name, col_name, col_query, batch_size=batch_size):
+            if date_field and date_field in doc:
+                raw_val = doc[date_field]
+                if isinstance(raw_val, datetime):
+                    last_date = (
+                        raw_val.replace(tzinfo=timezone.utc)
+                        if raw_val.tzinfo is None
+                        else raw_val
+                    )
+
+            try:
+                batch.append(transformer.transform(doc))
+            except Exception as exc:
+                col_skipped += 1
+                logger.warning(
+                    "doc_transform_failed",
+                    error=str(exc),
+                    skip_count=col_skipped,
+                )
+                continue
+
+            if len(batch) >= batch_size:
+                for fut in pending_futures:
+                    d, f = fut.result()
+                    col_docs += d
+                    col_files += f
+                pending_futures.clear()
+
+                fut = _submit_flush(
+                    pool, batch, last_date, transformer, writer,
+                    db_name, col_name, dry_run, logger,
+                    date_field=date_field if iceberg else None,
+                    use_iceberg=iceberg,
+                )
+                pending_futures.append(fut)
+                batch = []
+                last_date = None
+
+        if batch:
+            for fut in pending_futures:
+                d, f = fut.result()
+                col_docs += d
+                col_files += f
+            pending_futures.clear()
+
+            fut = _submit_flush(
+                pool, batch, last_date, transformer, writer,
+                db_name, col_name, dry_run, logger,
+                date_field=date_field if iceberg else None,
+                use_iceberg=iceberg,
+            )
+            pending_futures.append(fut)
+
+        for fut in pending_futures:
+            d, f = fut.result()
+            col_docs += d
+            col_files += f
+
+    logger.info(
+        "export_done",
+        database=db_name,
+        collection=col_name,
+        docs=col_docs,
+        files=col_files,
+    )
+    return col_docs, col_files, col_skipped
 
 
 def _submit_flush(

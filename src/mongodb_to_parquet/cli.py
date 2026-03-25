@@ -85,6 +85,7 @@ def export(
         None, help="Simulate without writing any files (default: false)"
     ),
     iceberg: bool = typer.Option(False, "--iceberg", help="Write to Iceberg table (REST catalog)"),
+    no_resume: bool = typer.Option(False, "--no-resume", help="Skip resume check, start export from scratch"),
     catalog_uri: Optional[str] = typer.Option(
         None, "--catalog-uri", envvar="MTP_CATALOG_URI", help="Iceberg REST catalog URI"
     ),
@@ -296,7 +297,7 @@ def export(
                 # In Iceberg mode, resume from the last written date to
                 # avoid re-processing documents already in the table.
                 col_query = dict(query)
-                if iceberg and date_field:
+                if iceberg and date_field and not no_resume:
                     resume_date = writer.get_resume_date(db_name, col_name, date_field)
                     if resume_date:
                         existing_filter = col_query.get(date_field, {})

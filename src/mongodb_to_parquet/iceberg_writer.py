@@ -96,7 +96,6 @@ class IcebergWriter:
         self.log.info("iceberg_resume_check", identifier=identifier)
         try:
             table = self.catalog.load_table(identifier)
-            self.log.info("iceberg_resume_table_loaded", identifier=identifier)
         except NoSuchTableError:
             self.log.info("iceberg_resume_no_table", identifier=identifier)
             return None
@@ -104,6 +103,14 @@ class IcebergWriter:
             self.log.warning("iceberg_resume_load_failed", identifier=identifier, error=str(exc))
             return None
 
+        # Check snapshot metadata (no S3 read) to see if the table has data.
+        snapshots = table.snapshots()
+        if not snapshots:
+            self.log.info("iceberg_resume_empty_table", identifier=identifier)
+            return None
+
+        # Scan only the date column to find the max value.
+        self.log.info("iceberg_resume_scanning", identifier=identifier)
         try:
             scan = table.scan(selected_fields=(date_field,), row_filter=AlwaysTrue())
             arrow = scan.to_arrow()

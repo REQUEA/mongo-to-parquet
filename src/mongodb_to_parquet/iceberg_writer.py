@@ -1,12 +1,14 @@
 """Iceberg writer — writes Arrow tables to an Iceberg REST catalog (Nessie, no auth)."""
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
 
 import pyarrow as pa
 import structlog
 from pyiceberg.catalog import load_catalog
 from pyiceberg.exceptions import NamespaceAlreadyExistsError, NoSuchTableError
+from pyiceberg.expressions import AlwaysTrue
 from pyiceberg.transforms import DayTransform
 
 log = structlog.get_logger()
@@ -28,6 +30,9 @@ class IcebergWriter:
         warehouse: str,
         namespace: str = "default",
         s3_endpoint: Optional[str] = None,
+        s3_access_key_id: Optional[str] = None,
+        s3_secret_access_key: Optional[str] = None,
+        s3_region: Optional[str] = None,
     ) -> None:
         catalog_props: dict[str, str] = {
             "type": "rest",
@@ -36,6 +41,14 @@ class IcebergWriter:
         }
         if s3_endpoint:
             catalog_props["s3.endpoint"] = s3_endpoint
+            # MinIO and most S3-compatible stores need path-style access
+            catalog_props["s3.path-style-access"] = "true"
+        if s3_access_key_id:
+            catalog_props["s3.access-key-id"] = s3_access_key_id
+        if s3_secret_access_key:
+            catalog_props["s3.secret-access-key"] = s3_secret_access_key
+        if s3_region:
+            catalog_props["s3.region"] = s3_region
 
         self.catalog = load_catalog("rest", **catalog_props)
         self.namespace = namespace
@@ -68,6 +81,37 @@ class IcebergWriter:
             identifier=identifier,
             rows=len(arrow_table),
         )
+
+    def get_resume_date(
+        self,
+        database: str,
+        collection: str,
+        date_field: str,
+    ) -> Optional[datetime]:
+        """Return the max value of *date_field* already in the Iceberg table.
+
+        Returns ``None`` if the table does not exist or is empty.
+        """
+        identifier = f"{self.namespace}.{database}__{collection.lower()}"
+        try:
+            table = self.catalog.load_table(identifier)
+        except NoSuchTableError:
+            return None
+
+        scan = table.scan(selected_fields=(date_field,), row_filter=AlwaysTrue())
+        arrow = scan.to_arrow()
+        if len(arrow) == 0:
+            return None
+
+        col = arrow.column(date_field)
+        max_val = pa.compute.max(col).as_py()
+        self.log.info(
+            "iceberg_resume_date",
+            identifier=identifier,
+            date_field=date_field,
+            resume_after=str(max_val),
+        )
+        return max_val
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -204,3 +204,44 @@ class TestIcebergWriterWrite:
 
         update_mock.union_by_name.assert_called_once()
         table_mock.append.assert_called_once_with(extended_table)
+
+
+class TestIcebergWriterResume:
+    def test_resume_date_returns_max_date(self, writer):
+        import pandas as pd
+
+        w, catalog = writer
+        table_mock = MagicMock()
+        catalog.load_table.return_value = table_mock
+
+        # Simulate scan returning a table with timestamps
+        dates = pa.array(pd.to_datetime(["2024-01-10", "2024-03-15", "2024-02-20"]))
+        scan_result = pa.table({"created_at": dates})
+        scan_mock = MagicMock()
+        scan_mock.to_arrow.return_value = scan_result
+        table_mock.scan.return_value = scan_mock
+
+        result = w.get_resume_date("mydb", "orders", "created_at")
+
+        assert result == pd.Timestamp("2024-03-15")
+
+    def test_resume_date_returns_none_when_table_missing(self, writer):
+        from pyiceberg.exceptions import NoSuchTableError
+
+        w, catalog = writer
+        catalog.load_table.side_effect = NoSuchTableError("nope")
+
+        result = w.get_resume_date("mydb", "orders", "created_at")
+        assert result is None
+
+    def test_resume_date_returns_none_when_table_empty(self, writer):
+        w, catalog = writer
+        table_mock = MagicMock()
+        catalog.load_table.return_value = table_mock
+
+        scan_mock = MagicMock()
+        scan_mock.to_arrow.return_value = pa.table({"created_at": pa.array([], type=pa.timestamp("us"))})
+        table_mock.scan.return_value = scan_mock
+
+        result = w.get_resume_date("mydb", "orders", "created_at")
+        assert result is None

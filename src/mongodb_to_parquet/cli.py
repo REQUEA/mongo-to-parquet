@@ -98,6 +98,18 @@ def export(
         None, "--s3-endpoint", envvar="MTP_S3_ENDPOINT",
         help="S3-compatible endpoint URL (e.g. http://minio:9000)",
     ),
+    s3_access_key_id: Optional[str] = typer.Option(
+        None, "--s3-access-key-id", envvar="AWS_ACCESS_KEY_ID",
+        help="S3 access key ID",
+    ),
+    s3_secret_access_key: Optional[str] = typer.Option(
+        None, "--s3-secret-access-key", envvar="AWS_SECRET_ACCESS_KEY",
+        help="S3 secret access key",
+    ),
+    s3_region: Optional[str] = typer.Option(
+        None, "--s3-region", envvar="AWS_DEFAULT_REGION",
+        help="S3 region (e.g. us-east-1)",
+    ),
     log_level: Optional[str] = typer.Option(None, envvar="LOG_LEVEL"),
     log_format: Optional[str] = typer.Option(None, envvar="LOG_FORMAT"),
 ) -> None:
@@ -128,6 +140,9 @@ def export(
     warehouse = warehouse or iceberg_cfg.get("warehouse")
     namespace = namespace if namespace != "default" else iceberg_cfg.get("namespace", namespace)
     s3_endpoint = s3_endpoint or iceberg_cfg.get("s3_endpoint")
+    s3_access_key_id = s3_access_key_id or iceberg_cfg.get("s3_access_key_id")
+    s3_secret_access_key = s3_secret_access_key or iceberg_cfg.get("s3_secret_access_key")
+    s3_region = s3_region or iceberg_cfg.get("s3_region")
 
     # Optional values: CLI → config → hardcoded default
     databases = databases or export_cfg.get("databases")
@@ -244,6 +259,9 @@ def export(
             warehouse,
             namespace,
             s3_endpoint=s3_endpoint,
+            s3_access_key_id=s3_access_key_id,
+            s3_secret_access_key=s3_secret_access_key,
+            s3_region=s3_region,
         )
     else:
         writer = ParquetWriter(
@@ -275,10 +293,26 @@ def export(
 
                 logger.info("export_start", database=db_name, collection=col_name)
 
+                # In Iceberg mode, resume from the last written date to
+                # avoid re-processing documents already in the table.
+                col_query = dict(query)
+                if iceberg and date_field:
+                    resume_date = writer.get_resume_date(db_name, col_name, date_field)
+                    if resume_date:
+                        existing_filter = col_query.get(date_field, {})
+                        existing_filter["$gt"] = resume_date
+                        col_query[date_field] = existing_filter
+                        logger.info(
+                            "resuming_export",
+                            database=db_name,
+                            collection=col_name,
+                            resume_after=str(resume_date),
+                        )
+
                 batch: list = []
                 last_date: Optional[datetime] = None
 
-                for doc in extractor.stream(db_name, col_name, query, batch_size=batch_size):
+                for doc in extractor.stream(db_name, col_name, col_query, batch_size=batch_size):
                     # Capture partition date from raw doc before transform
                     if date_field and date_field in doc:
                         raw_val = doc[date_field]

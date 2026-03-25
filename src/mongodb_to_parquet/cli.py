@@ -9,6 +9,7 @@ always take priority over config file values.
 from __future__ import annotations
 
 import sys
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -86,6 +87,10 @@ def export(
     ),
     iceberg: bool = typer.Option(False, "--iceberg", help="Write to Iceberg table (REST catalog)"),
     no_resume: bool = typer.Option(False, "--no-resume", help="Skip resume check, start export from scratch"),
+    write_workers: Optional[int] = typer.Option(
+        None, "--write-workers", envvar="MTP_WRITE_WORKERS",
+        help="Number of parallel write threads (default: 2)",
+    ),
     catalog_uri: Optional[str] = typer.Option(
         None, "--catalog-uri", envvar="MTP_CATALOG_URI", help="Iceberg REST catalog URI"
     ),
@@ -152,6 +157,7 @@ def export(
     end_date = end_date or filters_cfg.get("end_date")
     partition_pattern = partition_pattern or export_cfg.get("partition_pattern")
 
+    write_workers = write_workers if write_workers is not None else export_cfg.get("write_workers", 2)
     batch_size = batch_size if batch_size is not None else export_cfg.get("batch_size", 1000)
     compression = compression if compression is not None else export_cfg.get("compression", "zstd")
     compression_level = compression_level if compression_level is not None else export_cfg.get("compression_level", 3)
@@ -312,50 +318,61 @@ def export(
 
                 batch: list = []
                 last_date: Optional[datetime] = None
+                pending_futures: list[Future] = []
 
-                for doc in extractor.stream(db_name, col_name, col_query, batch_size=batch_size):
-                    # Capture partition date from raw doc before transform
-                    if date_field and date_field in doc:
-                        raw_val = doc[date_field]
-                        if isinstance(raw_val, datetime):
-                            last_date = (
-                                raw_val.replace(tzinfo=timezone.utc)
-                                if raw_val.tzinfo is None
-                                else raw_val
+                with ThreadPoolExecutor(max_workers=write_workers) as pool:
+                    for doc in extractor.stream(db_name, col_name, col_query, batch_size=batch_size):
+                        # Capture partition date from raw doc before transform
+                        if date_field and date_field in doc:
+                            raw_val = doc[date_field]
+                            if isinstance(raw_val, datetime):
+                                last_date = (
+                                    raw_val.replace(tzinfo=timezone.utc)
+                                    if raw_val.tzinfo is None
+                                    else raw_val
+                                )
+
+                        try:
+                            batch.append(transformer.transform(doc))
+                        except Exception as exc:
+                            skip_count += 1
+                            logger.warning(
+                                "doc_transform_failed",
+                                error=str(exc),
+                                skip_count=skip_count,
+                            )
+                            continue
+
+                        if len(batch) >= batch_size:
+                            fut = _submit_flush(
+                                pool, batch, last_date, transformer, writer,
+                                db_name, col_name, dry_run, logger,
+                                date_field=date_field if iceberg else None,
+                                use_iceberg=iceberg,
+                            )
+                            pending_futures.append(fut)
+                            batch = []
+                            last_date = None
+                            # Harvest completed futures to detect errors early
+                            pending_futures = _harvest_futures(
+                                pending_futures, total_docs, total_files, logger,
                             )
 
-                    try:
-                        batch.append(transformer.transform(doc))
-                    except Exception as exc:
-                        skip_count += 1
-                        logger.warning(
-                            "doc_transform_failed",
-                            error=str(exc),
-                            skip_count=skip_count,
-                        )
-                        continue
-
-                    if len(batch) >= batch_size:
-                        d, f = _flush_batch(
-                            batch, last_date, transformer, writer,
+                    # Flush remaining documents
+                    if batch:
+                        fut = _submit_flush(
+                            pool, batch, last_date, transformer, writer,
                             db_name, col_name, dry_run, logger,
                             date_field=date_field if iceberg else None,
                             use_iceberg=iceberg,
                         )
+                        pending_futures.append(fut)
+
+                    # Wait for all writes to complete
+                    for fut in pending_futures:
+                        d, f = fut.result()
                         total_docs += d
                         total_files += f
-                        last_date = None
-
-                # Flush remaining documents
-                if batch:
-                    d, f = _flush_batch(
-                        batch, last_date, transformer, writer,
-                        db_name, col_name, dry_run, logger,
-                        date_field=date_field if iceberg else None,
-                        use_iceberg=iceberg,
-                    )
-                    total_docs += d
-                    total_files += f
 
                 logger.info(
                     "export_done",
@@ -389,7 +406,8 @@ def export(
 # ---------------------------------------------------------------------------
 
 
-def _flush_batch(
+def _submit_flush(
+    pool: ThreadPoolExecutor,
     batch: list,
     last_date: Optional[datetime],
     transformer: DocumentTransformer,
@@ -401,32 +419,55 @@ def _flush_batch(
     *,
     date_field: Optional[str] = None,
     use_iceberg: bool = False,
-) -> tuple[int, int]:
-    """Transform a batch of documents, write to Parquet or Iceberg, return (docs, files)."""
+) -> Future:
+    """Convert batch to Arrow in the main thread, then submit write to the pool."""
     table = transformer.to_arrow(batch)
-    # Free the Python dicts immediately after the Arrow table is built so the
-    # batch list and the columnar table do not coexist in memory during the write.
-    batch.clear()
 
     if use_iceberg:
         if dry_run:
             logger.info("dry_run_batch", mode="iceberg", rows=len(table))
-            return len(table), 0
-        writer.write(table, db_name, col_name, date_field=date_field)
-        return len(table), 1
+            fut: Future = Future()
+            fut.set_result((len(table), 0))
+            return fut
+        return pool.submit(_write_iceberg, writer, table, db_name, col_name, date_field, logger)
 
     partition_path = writer.get_partition_path(db_name, col_name, last_date)
 
     if dry_run:
-        logger.info(
-            "dry_run_batch",
-            partition=str(partition_path),
-            rows=len(table),
-        )
-        return len(table), 0
+        logger.info("dry_run_batch", partition=str(partition_path), rows=len(table))
+        fut = Future()
+        fut.set_result((len(table), 0))
+        return fut
 
+    return pool.submit(_write_parquet, writer, table, partition_path, logger)
+
+
+def _write_iceberg(writer, table, db_name, col_name, date_field, logger) -> tuple[int, int]:
+    """Write an Arrow table to Iceberg (runs in a worker thread)."""
+    writer.write(table, db_name, col_name, date_field=date_field)
+    return len(table), 1
+
+
+def _write_parquet(writer, table, partition_path, logger) -> tuple[int, int]:
+    """Write an Arrow table to Parquet (runs in a worker thread)."""
     writer.write(table, partition_path)
     return len(table), 1
+
+
+def _harvest_futures(
+    futures: list[Future],
+    total_docs: int,
+    total_files: int,
+    logger,
+) -> list[Future]:
+    """Collect results from completed futures; re-raise errors early."""
+    still_pending = []
+    for fut in futures:
+        if fut.done():
+            fut.result()  # raises if the write failed
+        else:
+            still_pending.append(fut)
+    return still_pending
 
 
 def main() -> None:

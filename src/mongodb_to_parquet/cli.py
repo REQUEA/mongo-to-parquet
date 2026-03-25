@@ -149,6 +149,7 @@ def export(
     s3_access_key_id = s3_access_key_id or iceberg_cfg.get("s3_access_key_id")
     s3_secret_access_key = s3_secret_access_key or iceberg_cfg.get("s3_secret_access_key")
     s3_region = s3_region or iceberg_cfg.get("s3_region")
+    no_resume = no_resume or iceberg_cfg.get("no_resume", False)
 
     # Optional values: CLI → config → hardcoded default
     databases = databases or export_cfg.get("databases")

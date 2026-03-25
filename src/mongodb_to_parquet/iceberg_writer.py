@@ -93,8 +93,10 @@ class IcebergWriter:
         Returns ``None`` if the table does not exist or is empty.
         """
         identifier = f"{self.namespace}.{database}__{collection.lower()}"
+        self.log.info("iceberg_resume_check", identifier=identifier)
         try:
             table = self.catalog.load_table(identifier)
+            self.log.info("iceberg_resume_table_loaded", identifier=identifier)
         except NoSuchTableError:
             self.log.info("iceberg_resume_no_table", identifier=identifier)
             return None

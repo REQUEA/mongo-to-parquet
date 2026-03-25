@@ -96,11 +96,21 @@ class IcebergWriter:
         try:
             table = self.catalog.load_table(identifier)
         except NoSuchTableError:
+            self.log.info("iceberg_resume_no_table", identifier=identifier)
+            return None
+        except Exception as exc:
+            self.log.warning("iceberg_resume_load_failed", identifier=identifier, error=str(exc))
             return None
 
-        scan = table.scan(selected_fields=(date_field,), row_filter=AlwaysTrue())
-        arrow = scan.to_arrow()
+        try:
+            scan = table.scan(selected_fields=(date_field,), row_filter=AlwaysTrue())
+            arrow = scan.to_arrow()
+        except Exception as exc:
+            self.log.warning("iceberg_resume_scan_failed", identifier=identifier, error=str(exc))
+            return None
+
         if len(arrow) == 0:
+            self.log.info("iceberg_resume_empty_table", identifier=identifier)
             return None
 
         col = arrow.column(date_field)

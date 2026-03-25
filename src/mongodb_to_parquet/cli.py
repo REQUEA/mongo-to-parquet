@@ -321,7 +321,11 @@ def export(
                 last_date: Optional[datetime] = None
                 pending_futures: list[Future] = []
 
-                with ThreadPoolExecutor(max_workers=write_workers) as pool:
+                # Iceberg commits must be serialized (snapshot conflicts);
+                # parallelism only helps for local Parquet file writes.
+                effective_workers = 1 if iceberg else write_workers
+
+                with ThreadPoolExecutor(max_workers=effective_workers) as pool:
                     for doc in extractor.stream(db_name, col_name, col_query, batch_size=batch_size):
                         # Capture partition date from raw doc before transform
                         if date_field and date_field in doc:
@@ -345,6 +349,15 @@ def export(
                             continue
 
                         if len(batch) >= batch_size:
+                            # Wait for the previous write before submitting a
+                            # new one (keeps 1 write in flight while we extract
+                            # the next batch from MongoDB).
+                            for fut in pending_futures:
+                                d, f = fut.result()
+                                total_docs += d
+                                total_files += f
+                            pending_futures.clear()
+
                             fut = _submit_flush(
                                 pool, batch, last_date, transformer, writer,
                                 db_name, col_name, dry_run, logger,
@@ -354,13 +367,15 @@ def export(
                             pending_futures.append(fut)
                             batch = []
                             last_date = None
-                            # Harvest completed futures to detect errors early
-                            pending_futures = _harvest_futures(
-                                pending_futures, total_docs, total_files, logger,
-                            )
 
                     # Flush remaining documents
                     if batch:
+                        for fut in pending_futures:
+                            d, f = fut.result()
+                            total_docs += d
+                            total_files += f
+                        pending_futures.clear()
+
                         fut = _submit_flush(
                             pool, batch, last_date, transformer, writer,
                             db_name, col_name, dry_run, logger,

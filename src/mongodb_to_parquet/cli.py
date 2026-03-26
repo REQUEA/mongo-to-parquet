@@ -24,9 +24,14 @@ from .writer import ParquetWriter
 
 app = typer.Typer(
     name="mongo-to-parquet",
-    help="Export MongoDB collections to Parquet files.",
+    help="Export databases to Parquet files or Iceberg tables.",
     no_args_is_help=True,
 )
+
+# Register MariaDB export command
+from .mariadb_cli import export_mariadb  # noqa: E402
+
+app.command(name="export-mariadb")(export_mariadb)
 
 
 def _load_yaml_config(path: Path) -> dict:

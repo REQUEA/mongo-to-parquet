@@ -882,6 +882,7 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pyiceberg", extra = ["pyarrow", "s3fs"] },
     { name = "pymongo" },
+    { name = "pymysql" },
     { name = "python-json-logger" },
     { name = "pyyaml" },
     { name = "structlog" },
@@ -915,6 +916,7 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=14.0.0" },
     { name = "pyiceberg", extras = ["pyarrow", "s3fs"], specifier = ">=0.7.0" },
     { name = "pymongo", specifier = ">=4.6.0" },
+    { name = "pymysql", specifier = ">=1.1.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.1.0" },
     { name = "python-json-logger", specifier = ">=2.0.7" },
@@ -1921,6 +1923,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/7e/af/78c13179961e418396ec6ef53c0f1c855f1e9f1176d10909e8345d65366a/pymongo-4.15.5-cp314-cp314t-win32.whl", hash = "sha256:7c285614a3e8570b03174a25db642e449b0e7f77a6c9e487b73b05c9bf228ee6", size = 1044015, upload-time = "2025-12-02T18:44:05.318Z" },
     { url = "https://files.pythonhosted.org/packages/b0/d5/49012f03418dce976124da339f3a6afbe6959cb0468ca6302596fe272926/pymongo-4.15.5-cp314-cp314t-win_amd64.whl", hash = "sha256:aae7d96f7b2b1a2753349130797543e61e93ee2ace8faa7fbe0565e2eb5d815f", size = 1078481, upload-time = "2025-12-02T18:44:07.215Z" },
     { url = "https://files.pythonhosted.org/packages/5e/fc/f352a070d8ff6f388ce344c5ddb82348a38e0d1c99346fa6bfdef07134fe/pymongo-4.15.5-cp314-cp314t-win_arm64.whl", hash = "sha256:576a7d4b99465d38112c72f7f3d345f9d16aeeff0f923a3b298c13e15ab4f0ad", size = 1051166, upload-time = "2025-12-02T18:44:09.048Z" },
+]
+
+[[package]]
+name = "pymysql"
+version = "1.1.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f5/ae/1fe3fcd9f959efa0ebe200b8de88b5a5ce3e767e38c7ac32fb179f16a388/pymysql-1.1.2.tar.gz", hash = "sha256:4961d3e165614ae65014e361811a724e2044ad3ea3739de9903ae7c21f539f03", size = 48258, upload-time = "2025-08-24T12:55:55.146Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7c/4c/ad33b92b9864cbde84f259d5df035a6447f91891f5be77788e2a3892bce3/pymysql-1.1.2-py3-none-any.whl", hash = "sha256:e6b1d89711dd51f8f74b1631fe08f039e7d76cf67a42a323d3178f0f25762ed9", size = 45300, upload-time = "2025-08-24T12:55:53.394Z" },
 ]
 
 [[package]]

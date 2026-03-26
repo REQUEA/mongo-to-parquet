@@ -17,7 +17,6 @@ dependencies = [
     "structlog>=24.0.0",
     "pre-commit>=4.5.1",
     "pyiceberg[pyarrow,s3fs]>=0.7.0",
-    "pymysql>=1.1.2",
 ]
 
 [project.optional-dependencies]
